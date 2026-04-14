@@ -34,7 +34,7 @@ jobs:
           LATEST=$(curl -s https://api.github.com/repos/projectdiscovery/nuclei/releases/latest | jq -r '.tag_name')
           VER=${LATEST#v}
           wget https://github.com/projectdiscovery/nuclei/releases/download/${LATEST}/nuclei_${VER}_linux_amd64.zip
-          unzip nuclei_${VER}_linux_amd64.zip
+          unzip -o nuclei_${VER}_linux_amd64.zip
           sudo mv nuclei /usr/bin/
           chmod +x /usr/bin/nuclei
 
