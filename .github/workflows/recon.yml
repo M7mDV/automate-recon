@@ -1,0 +1,93 @@
+name: Recon & Takeover + Discord Alert
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # كل 6 ساعات
+  workflow_dispatch:
+
+jobs:
+  full-recon:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install Tools
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y wget unzip jq git curl dnsutils
+
+          go install github.com/projectdiscovery/httpx/cmd/httpx@latest && sudo mv ~/go/bin/httpx /usr/bin/
+          go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && sudo mv ~/go/bin/subfinder /usr/bin/
+          go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest && sudo mv ~/go/bin/dnsx /usr/bin/
+          go install github.com/tomnomnom/anew@latest && sudo mv ~/go/bin/anew /usr/bin/
+          go install github.com/cybercdh/assetfinder@latest && sudo mv ~/go/bin/assetfinder /usr/bin/
+          go install github.com/PentestPad/subzy@latest && sudo mv ~/go/bin/subzy /usr/bin/
+
+          LATEST=$(curl -s https://api.github.com/repos/projectdiscovery/nuclei/releases/latest | jq -r '.tag_name')
+          VER=${LATEST#v}
+          wget https://github.com/projectdiscovery/nuclei/releases/download/${LATEST}/nuclei_${VER}_linux_amd64.zip
+          unzip nuclei_${VER}_linux_amd64.zip
+          sudo mv nuclei /usr/bin/
+          chmod +x /usr/bin/nuclei
+
+      - name: Recon
+        env:
+          DOMAIN: ${{ secrets.DOMAIN }}
+        run: |
+          set -e
+          mkdir -p results/$DOMAIN
+
+          echo "[*] Collecting subdomains..."
+          subfinder -d $DOMAIN -silent > new.txt
+          assetfinder $DOMAIN --subs-only >> new.txt
+          sort -u new.txt > all.txt
+
+          # مقارنة بالجديد
+          touch old.txt
+          cat all.txt | anew old.txt > diff.txt
+          cp all.txt old.txt
+
+          echo "[*] Live hosts..."
+          cat all.txt | httpx -silent -o results/$DOMAIN/httpx.txt
+
+          echo "[*] Takeover scan..."
+          subzy run --targets all.txt --hide_fails --vuln --output results/$DOMAIN/subzy.json
+
+          echo "[*] Nuclei scan..."
+          nuclei -l results/$DOMAIN/httpx.txt -silent -o results/$DOMAIN/nuclei.txt
+
+      - name: Send to Discord
+        if: always()
+        run: |
+          WEBHOOK="${{ secrets.DISCORD_WEBHOOK }}"
+
+          if [ -s diff.txt ]; then
+            MSG=$(head -n 20 diff.txt)
+
+            curl -H "Content-Type: application/json" \
+            -X POST \
+            -d "{\"content\":\"🔥 New Subdomains Found:\n$MSG\"}" \
+            $WEBHOOK
+          else
+            curl -H "Content-Type: application/json" \
+            -X POST \
+            -d "{\"content\":\"✅ No new subdomains found.\"}" \
+            $WEBHOOK
+          fi
+
+      - name: Save Results
+        run: |
+          git config --global user.email "${{ secrets.EMAIL_ADDRESS }}"
+          git config --global user.name "${{ secrets.USER_NAME }}"
+
+          git add .
+          git commit -m "Auto Recon $(date -u)" || echo "No changes"
+          git push
