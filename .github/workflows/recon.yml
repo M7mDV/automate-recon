@@ -1,4 +1,4 @@
-name: 🔍 Full Recon Pipeline v2
+name: 🔍 Full Recon Pipeline v3 (Fixed)
 
 on:
   workflow_dispatch:
@@ -99,9 +99,33 @@ jobs:
           # Gospider
           go install -v github.com/jaeles-project/gospider@latest
           
-          # ParamSpider
-          git clone https://github.com/devanshbatham/ParamSpider.git
-          pip3 install -r ParamSpider/requirements.txt
+          # ============================================
+          # PARAMSPIDER - FIXED INSTALLATION
+          # ============================================
+          
+          # Option 1: Try pip install from git (Recommended)
+          pip3 install git+https://github.com/devanshbatham/ParamSpider.git 2>/dev/null || true
+          
+          # Option 2: If pip fails, clone and install manually
+          if ! command -v paramspider &> /dev/null; then
+              echo "[*] ParamSpider pip install failed, trying manual install..."
+              git clone https://github.com/devanshbatham/ParamSpider.git /tmp/ParamSpider
+              cd /tmp/ParamSpider
+              
+              # Check if setup.py exists
+              if [ -f setup.py ]; then
+                  pip3 install . 2>/dev/null || true
+              elif [ -f pyproject.toml ]; then
+                  pip3 install . 2>/dev/null || true
+              else
+                  # Fallback: just run the script directly
+                  echo "[*] No setup.py found, will use direct execution"
+              fi
+              cd -
+          fi
+          
+          # Alternative: Arjun (better maintained param discovery)
+          pip3 install arjun 2>/dev/null || true
           
           # X8
           wget -q https://github.com/Sh1Yo/x8/releases/latest/download/x8-linux-x86_64.tar.gz
@@ -120,8 +144,8 @@ jobs:
           # GF (grep on steroids)
           go install -v github.com/tomnomnom/gf@latest
           mkdir -p ~/.gf
-          git clone https://github.com/1ndianl33t/Gf-Patterns.git
-          cp Gf-Patterns/*.json ~/.gf/
+          git clone https://github.com/1ndianl33t/Gf-Patterns.git /tmp/Gf-Patterns
+          cp /tmp/Gf-Patterns/*.json ~/.gf/
           
           # Uro
           go install -v github.com/s0md3v/uro@latest
@@ -132,10 +156,33 @@ jobs:
           # HTTPx
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
           
-          # Nuclei (optional but useful)
+          # Nuclei (optional)
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           
           echo "[+] All tools installed successfully"
+
+      - name: Verify installations
+        run: |
+          echo "[*] Verifying tools..."
+          which subfinder || echo "[!] subfinder missing"
+          which assetfinder || echo "[!] assetfinder missing"
+          which findomain || echo "[!] findomain missing"
+          which chaos || echo "[!] chaos missing"
+          which amass || echo "[!] amass missing"
+          which waybackurls || echo "[!] waybackurls missing"
+          which gau || echo "[!] gau missing"
+          which gauplus || echo "[!] gauplus missing"
+          which katana || echo "[!] katana missing"
+          which hakrawler || echo "[!] hakrawler missing"
+          which gospider || echo "[!] gospider missing"
+          which paramspider || echo "[!] paramspider missing"
+          which x8 || echo "[!] x8 missing"
+          which gf || echo "[!] gf missing"
+          which uro || echo "[!] uro missing"
+          which qsreplace || echo "[!] qsreplace missing"
+          which anew || echo "[!] anew missing"
+          which httpx || echo "[!] httpx missing"
+          echo "[+] Verification complete"
 
       - name: Create directories
         run: |
@@ -334,23 +381,53 @@ jobs:
               | sed -n 's/.*\(https:\/\/[^ ]*\).*/\1/p' \
               > recon_output/urls/GS1.txt || true
             
-            # Alternative: direct output
-            gospider -S recon_output/subs/AliveSubs.txt -t 20 -d ${{ env.CRAWL_DEPTH }} --js --sitemap --robots -o recon_output/urls/gospider_raw 2>/dev/null || true
-            
             echo "[+] Gospider: $(wc -l < recon_output/urls/GS1.txt 2>/dev/null || echo 0)"
           else
             touch recon_output/urls/GS1.txt
           fi
 
-      - name: 🔗 Phase 2H - ParamSpider
+      - name: 🔗 Phase 2H - ParamSpider (Fixed)
         run: |
           echo "[*] Running ParamSpider..."
-          while read domain; do
-            python3 ParamSpider/paramspider.py -d "$domain" -o "recon_output/urls/paramspider_${domain}.txt" 2>/dev/null || true
-          done < domains.txt
           
-          cat recon_output/urls/paramspider_*.txt 2>/dev/null | sort -u > recon_output/urls/PS1.txt || touch recon_output/urls/PS1.txt
-          echo "[+] ParamSpider: $(wc -l < recon_output/urls/PS1.txt 2>/dev/null || echo 0)"
+          # Try paramspider command first
+          if command -v paramspider &> /dev/null; then
+              echo "[+] Using paramspider CLI"
+              while read domain; do
+                  paramspider -d "$domain" -o "recon_output/urls/paramspider_${domain}.txt" 2>/dev/null || true
+              done < domains.txt
+          
+          # Try running from cloned repo
+          elif [ -f /tmp/ParamSpider/paramspider.py ]; then
+              echo "[+] Using ParamSpider from /tmp"
+              while read domain; do
+                  python3 /tmp/ParamSpider/paramspider.py -d "$domain" -o "recon_output/urls/paramspider_${domain}.txt" 2>/dev/null || true
+              done < domains.txt
+          
+          # Fallback: Arjun
+          elif command -v arjun &> /dev/null; then
+              echo "[!] ParamSpider not available, using Arjun fallback"
+              while read domain; do
+                  arjun -u "https://${domain}" -oT "recon_output/urls/arjun_${domain}.txt" 2>/dev/null || true
+              done < domains.txt
+          
+          # Last resort: manual param extraction with curl + grep
+          else
+              echo "[!] No param tool available, using manual extraction"
+              while read domain; do
+                  curl -s "https://${domain}" 2>/dev/null \
+                      | grep -oE 'href="[^"]*"' \
+                      | grep -oE 'https?://[^"]+' \
+                      | grep '?' \
+                      >> recon_output/urls/PS1_manual.txt || true
+              done < domains.txt
+          fi
+          
+          # Merge all param results
+          cat recon_output/urls/paramspider_*.txt recon_output/urls/arjun_*.txt recon_output/urls/PS1_manual.txt 2>/dev/null \
+              | sort -u > recon_output/urls/PS1.txt || touch recon_output/urls/PS1.txt
+          
+          echo "[+] ParamSpider/Arjun: $(wc -l < recon_output/urls/PS1.txt 2>/dev/null || echo 0)"
 
       - name: 🔗 Phase 2I - X8
         run: |
@@ -460,6 +537,7 @@ jobs:
         run: |
           echo "========== RECON SUMMARY ==========" > recon_output/final/SUMMARY.txt
           echo "Date: $(date)" >> recon_output/final/SUMMARY.txt
+          echo "Domains: ${{ github.event.inputs.domains }}" >> recon_output/final/SUMMARY.txt
           echo "" >> recon_output/final/SUMMARY.txt
           echo "[+] Total Subdomains: $(wc -l < recon_output/subs/AllSubs.txt 2>/dev/null || echo 0)" >> recon_output/final/SUMMARY.txt
           echo "[+] Alive Hosts: $(wc -l < recon_output/subs/AliveSubs.txt 2>/dev/null || echo 0)" >> recon_output/final/SUMMARY.txt
@@ -485,14 +563,12 @@ jobs:
           python3 << 'PYEOF'
           import os
           import requests
-          import glob
           
           webhook = os.environ.get('DISCORD_WEBHOOK')
           if not webhook:
               print("[!] No webhook")
               exit(1)
           
-          # Read stats
           def count_lines(f):
               try:
                   with open(f) as file:
@@ -514,7 +590,6 @@ jobs:
               "rce": count_lines('recon_output/gf_patterns/rce.txt'),
           }
           
-          # Main embed
           embed = {
               "title": "🔍 Full Recon Complete",
               "color": 0x00ff00,
@@ -529,15 +604,15 @@ jobs:
                   {"name": "📁 LFI", "value": f"`{stats['lfi']}`", "inline": True},
                   {"name": "⚡ RCE", "value": f"`{stats['rce']}`", "inline": True},
               ],
-              "footer": {"text": "Recon Pipeline v2.0"}
+              "footer": {"text": "Recon Pipeline v3.0"}
           }
           
-          # Send summary
           payload = {"embeds": [embed]}
           resp = requests.post(webhook, json=payload)
           print(f"Summary sent: {resp.status_code}")
           
           # Send important files
+          import glob
           important_files = [
               'recon_output/final/SUMMARY.txt',
               'recon_output/gf_patterns/xss.txt',
@@ -559,6 +634,6 @@ jobs:
       - name: 📦 Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: full-recon-${{ github.run_id }}
+          name: full-recon-v3-${{ github.run_id }}
           path: recon_output/
           retention-days: 7
