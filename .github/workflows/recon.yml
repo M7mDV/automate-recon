@@ -1,4 +1,4 @@
-name: 🔍 Full Recon Pipeline v3 (Fixed)
+name: 🔍 Full Recon Pipeline v4 (Error-Proof)
 
 on:
   workflow_dispatch:
@@ -24,6 +24,7 @@ jobs:
   recon:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    continue-on-error: true  # ✅ مهم جداً - يكمل حتى لو فيه errors
     
     steps:
       - name: Checkout repository
@@ -45,9 +46,12 @@ jobs:
           node-version: '20'
 
       - name: Install all tools
+        id: install
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq git wget curl python3-pip unzip ruby-full snapd
+          set +e  # ✅ Don't exit on error
+          sudo apt-get update || true
+          sudo apt-get install -y jq git wget curl python3-pip unzip ruby-full snapd || true
           
           # Add Go to PATH
           echo "$HOME/go/bin" >> $GITHUB_PATH
@@ -57,139 +61,120 @@ jobs:
           # SUBDOMAIN ENUMERATION TOOLS
           # ============================================
           
-          # Subfinder
-          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          echo "[*] Installing Subfinder..."
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest || echo "[!] Subfinder failed"
           
-          # Assetfinder
-          go install -v github.com/tomnomnom/assetfinder@latest
+          echo "[*] Installing Assetfinder..."
+          go install -v github.com/tomnomnom/assetfinder@latest || echo "[!] Assetfinder failed"
           
-          # Findomain
-          wget -q https://github.com/findomain/findomain/releases/latest/download/findomain-linux.zip
-          unzip -q findomain-linux.zip && chmod +x findomain && sudo mv findomain /usr/local/bin/
+          echo "[*] Installing Findomain..."
+          wget -q https://github.com/findomain/findomain/releases/latest/download/findomain-linux.zip || true
+          unzip -q findomain-linux.zip 2>/dev/null || true
+          chmod +x findomain 2>/dev/null || true
+          sudo mv findomain /usr/local/bin/ 2>/dev/null || echo "[!] Findomain failed"
           
-          # Chaos
-          go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest
+          echo "[*] Installing Chaos..."
+          go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest || echo "[!] Chaos failed"
           
-          # Amass (via snap)
-          sudo snap install amass
-          sudo ln -s /snap/bin/amass /usr/local/bin/amass
+          echo "[*] Installing Amass..."
+          sudo snap install amass 2>/dev/null || true
+          sudo ln -s /snap/bin/amass /usr/local/bin/amass 2>/dev/null || echo "[!] Amass failed"
           
           # ============================================
           # URL EXTRACTION TOOLS
           # ============================================
           
-          # Waybackurls
-          go install -v github.com/tomnomnom/waybackurls@latest
+          echo "[*] Installing Waybackurls..."
+          go install -v github.com/tomnomnom/waybackurls@latest || echo "[!] Waybackurls failed"
           
-          # Gau
-          go install -v github.com/lc/gau/v2/cmd/gau@latest
+          echo "[*] Installing Gau..."
+          go install -v github.com/lc/gau/v2/cmd/gau@latest || echo "[!] Gau failed"
           
-          # Gauplus
-          go install -v github.com/bp0lr/gauplus@latest
+          echo "[*] Installing Gauplus..."
+          go install -v github.com/bp0lr/gauplus@latest || echo "[!] Gauplus failed"
           
-          # Waymore
-          pip3 install waymore
+          echo "[*] Installing Waymore..."
+          pip3 install waymore 2>/dev/null || echo "[!] Waymore failed"
           
-          # Katana
-          go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+          echo "[*] Installing Katana..."
+          go install -v github.com/projectdiscovery/katana/cmd/katana@latest || echo "[!] Katana failed"
           
-          # Hakrawler
-          go install -v github.com/hakluke/hakrawler@latest
+          echo "[*] Installing Hakrawler..."
+          go install -v github.com/hakluke/hakrawler@latest || echo "[!] Hakrawler failed"
           
-          # Gospider
-          go install -v github.com/jaeles-project/gospider@latest
+          echo "[*] Installing Gospider..."
+          go install -v github.com/jaeles-project/gospider@latest || echo "[!] Gospider failed"
           
           # ============================================
-          # PARAMSPIDER - FIXED INSTALLATION
+          # PARAMSPIDER / ARJUN - FIXED
           # ============================================
           
-          # Option 1: Try pip install from git (Recommended)
-          pip3 install git+https://github.com/devanshbatham/ParamSpider.git 2>/dev/null || true
+          echo "[*] Installing ParamSpider..."
+          pip3 install git+https://github.com/devanshbatham/ParamSpider.git 2>/dev/null || {
+              echo "[!] ParamSpider pip failed, trying manual..."
+              git clone https://github.com/devanshbatham/ParamSpider.git /tmp/ParamSpider 2>/dev/null || true
+          }
           
-          # Option 2: If pip fails, clone and install manually
-          if ! command -v paramspider &> /dev/null; then
-              echo "[*] ParamSpider pip install failed, trying manual install..."
-              git clone https://github.com/devanshbatham/ParamSpider.git /tmp/ParamSpider
-              cd /tmp/ParamSpider
-              
-              # Check if setup.py exists
-              if [ -f setup.py ]; then
-                  pip3 install . 2>/dev/null || true
-              elif [ -f pyproject.toml ]; then
-                  pip3 install . 2>/dev/null || true
-              else
-                  # Fallback: just run the script directly
-                  echo "[*] No setup.py found, will use direct execution"
-              fi
-              cd -
-          fi
-          
-          # Alternative: Arjun (better maintained param discovery)
-          pip3 install arjun 2>/dev/null || true
+          echo "[*] Installing Arjun..."
+          pip3 install arjun 2>/dev/null || {
+              echo "[!] Arjun pip failed, trying alternative..."
+              pip3 install arjun --break-system-packages 2>/dev/null || true
+          }
           
           # X8
-          wget -q https://github.com/Sh1Yo/x8/releases/latest/download/x8-linux-x86_64.tar.gz
-          tar -xzf x8-linux-x86_64.tar.gz && sudo mv x8 /usr/local/bin/
+          echo "[*] Installing X8..."
+          wget -q https://github.com/Sh1Yo/x8/releases/latest/download/x8-linux-x86_64.tar.gz || true
+          tar -xzf x8-linux-x86_64.tar.gz 2>/dev/null || true
+          sudo mv x8 /usr/local/bin/ 2>/dev/null || echo "[!] X8 failed"
           
           # ============================================
           # FILTERING & UTILITIES
           # ============================================
           
-          # Anew
-          go install -v github.com/tomnomnom/anew@latest
+          echo "[*] Installing Anew..."
+          go install -v github.com/tomnomnom/anew@latest || echo "[!] Anew failed"
           
-          # Unfurl
-          go install -v github.com/tomnomnom/unfurl@latest
+          echo "[*] Installing Unfurl..."
+          go install -v github.com/tomnomnom/unfurl@latest || echo "[!] Unfurl failed"
           
-          # GF (grep on steroids)
-          go install -v github.com/tomnomnom/gf@latest
+          echo "[*] Installing GF..."
+          go install -v github.com/tomnomnom/gf@latest || echo "[!] GF failed"
           mkdir -p ~/.gf
-          git clone https://github.com/1ndianl33t/Gf-Patterns.git /tmp/Gf-Patterns
-          cp /tmp/Gf-Patterns/*.json ~/.gf/
+          git clone https://github.com/1ndianl33t/Gf-Patterns.git /tmp/Gf-Patterns 2>/dev/null || true
+          cp /tmp/Gf-Patterns/*.json ~/.gf/ 2>/dev/null || true
           
-          # Uro
-          go install -v github.com/s0md3v/uro@latest
+          echo "[*] Installing Uro..."
+          go install -v github.com/s0md3v/uro@latest || echo "[!] Uro failed"
           
-          # Qsreplace
-          go install -v github.com/tomnomnom/qsreplace@latest
+          echo "[*] Installing Qsreplace..."
+          go install -v github.com/tomnomnom/qsreplace@latest || echo "[!] Qsreplace failed"
           
-          # HTTPx
-          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          echo "[*] Installing HTTPx..."
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest || echo "[!] HTTPx failed"
           
-          # Nuclei (optional)
-          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          
-          echo "[+] All tools installed successfully"
+          echo "[+] Installation complete"
 
       - name: Verify installations
+        shell: bash
         run: |
-          echo "[*] Verifying tools..."
-          which subfinder || echo "[!] subfinder missing"
-          which assetfinder || echo "[!] assetfinder missing"
-          which findomain || echo "[!] findomain missing"
-          which chaos || echo "[!] chaos missing"
-          which amass || echo "[!] amass missing"
-          which waybackurls || echo "[!] waybackurls missing"
-          which gau || echo "[!] gau missing"
-          which gauplus || echo "[!] gauplus missing"
-          which katana || echo "[!] katana missing"
-          which hakrawler || echo "[!] hakrawler missing"
-          which gospider || echo "[!] gospider missing"
-          which paramspider || echo "[!] paramspider missing"
-          which x8 || echo "[!] x8 missing"
-          which gf || echo "[!] gf missing"
-          which uro || echo "[!] uro missing"
-          which qsreplace || echo "[!] qsreplace missing"
-          which anew || echo "[!] anew missing"
-          which httpx || echo "[!] httpx missing"
-          echo "[+] Verification complete"
+          set +e
+          echo "=== Tool Verification ==="
+          for tool in subfinder assetfinder findomain chaos amass waybackurls gau gauplus katana hakrawler gospider paramspider arjun x8 gf uro qsreplace anew httpx; do
+              if command -v $tool &> /dev/null; then
+                  echo "✅ $tool: OK"
+              else
+                  echo "❌ $tool: MISSING"
+              fi
+          done
+          echo "========================"
 
       - name: Create directories
-        run: |
-          mkdir -p recon_output/{subs,urls,params,gf_patterns,final}
+        run: mkdir -p recon_output/{subs,urls,params,gf_patterns,final}
 
       - name: Parse domains
+        shell: bash
         run: |
+          set +e
           echo "${{ github.event.inputs.domains }}" | tr ',' '\n' | sed 's/ //g' > domains.txt
           echo "[*] Target domains:"
           cat domains.txt
@@ -199,40 +184,52 @@ jobs:
       # ============================================
 
       - name: 🔎 Phase 1A - Subfinder
+        shell: bash
         run: |
+          set +e
           echo "[*] Running Subfinder..."
           while read domain; do
+            [ -z "$domain" ] && continue
             subfinder -d "$domain" -all -recursive -o "recon_output/subs/subs_subfinder_${domain}.txt" 2>/dev/null || true
           done < domains.txt
-          cat recon_output/subs/subs_subfinder_*.txt 2>/dev/null | sort -u > recon_output/subs/Subs01.txt
+          cat recon_output/subs/subs_subfinder_*.txt 2>/dev/null | sort -u > recon_output/subs/Subs01.txt || true
           echo "[+] Subfinder: $(wc -l < recon_output/subs/Subs01.txt 2>/dev/null || echo 0)"
 
       - name: 🔎 Phase 1B - Assetfinder
+        shell: bash
         run: |
+          set +e
           echo "[*] Running Assetfinder..."
           while read domain; do
+            [ -z "$domain" ] && continue
             echo "$domain" | assetfinder --subs-only 2>/dev/null >> recon_output/subs/subs_assetfinder_temp.txt || true
           done < domains.txt
-          sort -u recon_output/subs/subs_assetfinder_temp.txt > recon_output/subs/Subs02.txt 2>/dev/null || touch recon_output/subs/Subs02.txt
+          sort -u recon_output/subs/subs_assetfinder_temp.txt 2>/dev/null > recon_output/subs/Subs02.txt || touch recon_output/subs/Subs02.txt
           echo "[+] Assetfinder: $(wc -l < recon_output/subs/Subs02.txt 2>/dev/null || echo 0)"
 
       - name: 🔎 Phase 1C - Findomain
+        shell: bash
         run: |
+          set +e
           echo "[*] Running Findomain..."
           while read domain; do
+            [ -z "$domain" ] && continue
             findomain -t "$domain" -u "recon_output/subs/subs_findomain_${domain}.txt" 2>/dev/null || true
           done < domains.txt
-          cat recon_output/subs/subs_findomain_*.txt 2>/dev/null | sort -u > recon_output/subs/Subs05.txt
+          cat recon_output/subs/subs_findomain_*.txt 2>/dev/null | sort -u > recon_output/subs/Subs05.txt || touch recon_output/subs/Subs05.txt
           echo "[+] Findomain: $(wc -l < recon_output/subs/Subs05.txt 2>/dev/null || echo 0)"
 
       - name: 🔎 Phase 1D - Chaos
+        shell: bash
         run: |
+          set +e
           echo "[*] Running Chaos..."
           if [ -n "$PDCP_API_KEY" ]; then
             while read domain; do
+              [ -z "$domain" ] && continue
               chaos -d "$domain" -o "recon_output/subs/subs_chaos_${domain}.txt" 2>/dev/null || true
             done < domains.txt
-            cat recon_output/subs/subs_chaos_*.txt 2>/dev/null | sort -u > recon_output/subs/Subs06.txt
+            cat recon_output/subs/subs_chaos_*.txt 2>/dev/null | sort -u > recon_output/subs/Subs06.txt || touch recon_output/subs/Subs06.txt
             echo "[+] Chaos: $(wc -l < recon_output/subs/Subs06.txt 2>/dev/null || echo 0)"
           else
             echo "[!] Skipping Chaos (no API key)"
@@ -240,53 +237,69 @@ jobs:
           fi
 
       - name: 🔎 Phase 1E - Amass
+        shell: bash
         run: |
-          echo "[*] Running Amass (passive)..."
+          set +e
+          echo "[*] Running Amass..."
           while read domain; do
+            [ -z "$domain" ] && continue
             amass enum -passive -d "$domain" -o "recon_output/subs/subs_amass_${domain}.txt" 2>/dev/null || true
           done < domains.txt
-          cat recon_output/subs/subs_amass_*.txt 2>/dev/null | sort -u > recon_output/subs/Subs_amass.txt
+          cat recon_output/subs/subs_amass_*.txt 2>/dev/null | sort -u > recon_output/subs/Subs_amass.txt || touch recon_output/subs/Subs_amass.txt
           echo "[+] Amass: $(wc -l < recon_output/subs/Subs_amass.txt 2>/dev/null || echo 0)"
 
       - name: 🔎 Phase 1F - Passive Sources
+        shell: bash
         run: |
+          set +e
           echo "[*] Running crt.sh..."
           while read domain; do
+            [ -z "$domain" ] && continue
             curl -s "https://crt.sh/?q=%25.${domain}&output=json" \
               | jq -r '.[].name_value' 2>/dev/null \
               | sed 's/\*\.//g' \
               | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
               >> recon_output/subs/subs_crt_temp.txt || true
           done < domains.txt
-          sort -u recon_output/subs/subs_crt_temp.txt > recon_output/subs/Subs_crt.txt 2>/dev/null || touch recon_output/subs/Subs_crt.txt
+          sort -u recon_output/subs/subs_crt_temp.txt 2>/dev/null > recon_output/subs/Subs_crt.txt || touch recon_output/subs/Subs_crt.txt
           
           echo "[*] Running URLScan..."
           while read domain; do
+            [ -z "$domain" ] && continue
             curl -s "https://urlscan.io/api/v1/search/?q=domain:${domain}&size=1000" \
               | jq -r '.results[]?.page?.domain' 2>/dev/null \
               | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
               >> recon_output/subs/subs_urlscan_temp.txt || true
             sleep 2
           done < domains.txt
-          sort -u recon_output/subs/subs_urlscan_temp.txt > recon_output/subs/Subs_urlscan.txt 2>/dev/null || touch recon_output/subs/Subs_urlscan.txt
+          sort -u recon_output/subs/subs_urlscan_temp.txt 2>/dev/null > recon_output/subs/Subs_urlscan.txt || touch recon_output/subs/Subs_urlscan.txt
           
           echo "[+] crt.sh: $(wc -l < recon_output/subs/Subs_crt.txt 2>/dev/null || echo 0)"
           echo "[+] URLScan: $(wc -l < recon_output/subs/Subs_urlscan.txt 2>/dev/null || echo 0)"
 
       - name: 📊 Merge All Subdomains
+        shell: bash
         run: |
+          set +e
           echo "[*] Merging subdomains..."
           cat recon_output/subs/Subs*.txt recon_output/subs/subs_*.txt 2>/dev/null \
             | grep -E "^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$" \
             | sort -u \
-            | anew recon_output/subs/AllSubs.txt
+            | anew recon_output/subs/AllSubs.txt || {
+                echo "[!] anew failed, using sort -u"
+                cat recon_output/subs/Subs*.txt recon_output/subs/subs_*.txt 2>/dev/null \
+                  | grep -E "^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$" \
+                  | sort -u > recon_output/subs/AllSubs.txt
+            }
           
-          TOTAL_SUBS=$(wc -l < recon_output/subs/AllSubs.txt)
+          TOTAL_SUBS=$(wc -l < recon_output/subs/AllSubs.txt 2>/dev/null || echo 0)
           echo "total_subs=$TOTAL_SUBS" >> $GITHUB_ENV
           echo "[+] Total unique subdomains: $TOTAL_SUBS"
 
       - name: 🌐 HTTPx Probing
+        shell: bash
         run: |
+          set +e
           echo "[*] Probing with HTTPx..."
           if [ -s recon_output/subs/AllSubs.txt ]; then
             httpx -l recon_output/subs/AllSubs.txt \
@@ -311,8 +324,9 @@ jobs:
       # ============================================
 
       - name: 🔗 Phase 2A - Waybackurls
+        shell: bash
         run: |
-          echo "[*] Running Waybackurls..."
+          set +e
           if [ -s recon_output/subs/AliveSubs.txt ]; then
             cat recon_output/subs/AliveSubs.txt | waybackurls > recon_output/urls/WB1.txt 2>/dev/null || true
             echo "[+] Waybackurls: $(wc -l < recon_output/urls/WB1.txt 2>/dev/null || echo 0)"
@@ -321,8 +335,9 @@ jobs:
           fi
 
       - name: 🔗 Phase 2B - Waymore
+        shell: bash
         run: |
-          echo "[*] Running Waymore..."
+          set +e
           if [ -s recon_output/subs/AliveSubs.txt ]; then
             waymore -i recon_output/subs/AliveSubs.txt -mode U -l 1000 -from 2021 -oU recon_output/urls/WM1.txt 2>/dev/null || true
             echo "[+] Waymore: $(wc -l < recon_output/urls/WM1.txt 2>/dev/null || echo 0)"
@@ -331,8 +346,9 @@ jobs:
           fi
 
       - name: 🔗 Phase 2C - Gau
+        shell: bash
         run: |
-          echo "[*] Running Gau..."
+          set +e
           if [ -s recon_output/subs/AliveSubs.txt ]; then
             cat recon_output/subs/AliveSubs.txt | gau --threads 200 > recon_output/urls/GAU1.txt 2>/dev/null || true
             echo "[+] Gau: $(wc -l < recon_output/urls/GAU1.txt 2>/dev/null || echo 0)"
@@ -341,8 +357,9 @@ jobs:
           fi
 
       - name: 🔗 Phase 2D - Gauplus
+        shell: bash
         run: |
-          echo "[*] Running Gauplus..."
+          set +e
           if [ -s recon_output/subs/AliveSubs.txt ]; then
             gauplus -t 200 -random-agent < recon_output/subs/AliveSubs.txt > recon_output/urls/GAU2.txt 2>/dev/null || true
             echo "[+] Gauplus: $(wc -l < recon_output/urls/GAU2.txt 2>/dev/null || echo 0)"
@@ -351,8 +368,9 @@ jobs:
           fi
 
       - name: 🔗 Phase 2E - Hakrawler
+        shell: bash
         run: |
-          echo "[*] Running Hakrawler..."
+          set +e
           if [ -s recon_output/subs/AliveSubs.txt ]; then
             cat recon_output/subs/AliveSubs.txt | hakrawler -subs -u -insecure > recon_output/urls/HK1.txt 2>/dev/null || true
             echo "[+] Hakrawler: $(wc -l < recon_output/urls/HK1.txt 2>/dev/null || echo 0)"
@@ -361,8 +379,9 @@ jobs:
           fi
 
       - name: 🔗 Phase 2F - Katana
+        shell: bash
         run: |
-          echo "[*] Running Katana..."
+          set +e
           if [ -s recon_output/subs/AliveSubs.txt ]; then
             katana -list recon_output/subs/AliveSubs.txt \
               -jc -kf all -d ${{ env.CRAWL_DEPTH }} \
@@ -374,8 +393,9 @@ jobs:
           fi
 
       - name: 🔗 Phase 2G - Gospider
+        shell: bash
         run: |
-          echo "[*] Running Gospider..."
+          set +e
           if [ -s recon_output/subs/AliveSubs.txt ]; then
             gospider -S recon_output/subs/AliveSubs.txt -t 20 -d ${{ env.CRAWL_DEPTH }} --js --sitemap --robots 2>/dev/null \
               | sed -n 's/.*\(https:\/\/[^ ]*\).*/\1/p' \
@@ -386,52 +406,51 @@ jobs:
             touch recon_output/urls/GS1.txt
           fi
 
-      - name: 🔗 Phase 2H - ParamSpider (Fixed)
+      - name: 🔗 Phase 2H - ParamSpider/Arjun
+        shell: bash
         run: |
-          echo "[*] Running ParamSpider..."
+          set +e
+          echo "[*] Running ParamSpider/Arjun..."
           
-          # Try paramspider command first
+          PARAM_FOUND=false
+          
+          # Try ParamSpider first
           if command -v paramspider &> /dev/null; then
-              echo "[+] Using paramspider CLI"
+              echo "[+] Using ParamSpider CLI"
               while read domain; do
+                  [ -z "$domain" ] && continue
                   paramspider -d "$domain" -o "recon_output/urls/paramspider_${domain}.txt" 2>/dev/null || true
               done < domains.txt
+              PARAM_FOUND=true
           
-          # Try running from cloned repo
           elif [ -f /tmp/ParamSpider/paramspider.py ]; then
               echo "[+] Using ParamSpider from /tmp"
               while read domain; do
+                  [ -z "$domain" ] && continue
                   python3 /tmp/ParamSpider/paramspider.py -d "$domain" -o "recon_output/urls/paramspider_${domain}.txt" 2>/dev/null || true
               done < domains.txt
+              PARAM_FOUND=true
+          fi
           
-          # Fallback: Arjun
-          elif command -v arjun &> /dev/null; then
-              echo "[!] ParamSpider not available, using Arjun fallback"
+          # Fallback to Arjun
+          if [ "$PARAM_FOUND" = false ] && command -v arjun &> /dev/null; then
+              echo "[+] Using Arjun fallback"
               while read domain; do
+                  [ -z "$domain" ] && continue
                   arjun -u "https://${domain}" -oT "recon_output/urls/arjun_${domain}.txt" 2>/dev/null || true
-              done < domains.txt
-          
-          # Last resort: manual param extraction with curl + grep
-          else
-              echo "[!] No param tool available, using manual extraction"
-              while read domain; do
-                  curl -s "https://${domain}" 2>/dev/null \
-                      | grep -oE 'href="[^"]*"' \
-                      | grep -oE 'https?://[^"]+' \
-                      | grep '?' \
-                      >> recon_output/urls/PS1_manual.txt || true
               done < domains.txt
           fi
           
-          # Merge all param results
-          cat recon_output/urls/paramspider_*.txt recon_output/urls/arjun_*.txt recon_output/urls/PS1_manual.txt 2>/dev/null \
+          # Merge results
+          cat recon_output/urls/paramspider_*.txt recon_output/urls/arjun_*.txt 2>/dev/null \
               | sort -u > recon_output/urls/PS1.txt || touch recon_output/urls/PS1.txt
           
           echo "[+] ParamSpider/Arjun: $(wc -l < recon_output/urls/PS1.txt 2>/dev/null || echo 0)"
 
       - name: 🔗 Phase 2I - X8
+        shell: bash
         run: |
-          echo "[*] Running X8..."
+          set +e
           if [ -s recon_output/subs/AliveSubs.txt ]; then
             x8 -u recon_output/subs/AliveSubs.txt -o recon_output/urls/X81.txt 2>/dev/null || true
             echo "[+] X8: $(wc -l < recon_output/urls/X81.txt 2>/dev/null || echo 0)"
@@ -440,12 +459,19 @@ jobs:
           fi
 
       - name: 📊 Merge All URLs
+        shell: bash
         run: |
+          set +e
           echo "[*] Merging all URLs..."
           cat recon_output/urls/*.txt 2>/dev/null \
             | grep -E "^https?://" \
             | sort -u \
-            | anew recon_output/urls/AllURLs.txt
+            | anew recon_output/urls/AllURLs.txt || {
+                echo "[!] anew failed, using sort -u"
+                cat recon_output/urls/*.txt 2>/dev/null \
+                  | grep -E "^https?://" \
+                  | sort -u > recon_output/urls/AllURLs.txt
+            }
           
           TOTAL_URLS=$(wc -l < recon_output/urls/AllURLs.txt 2>/dev/null || echo 0)
           echo "total_urls=$TOTAL_URLS" >> $GITHUB_ENV
@@ -456,27 +482,34 @@ jobs:
       # ============================================
 
       - name: 🔧 Phase 3A - Parameter URLs
+        shell: bash
         run: |
+          set +e
           echo "[*] Extracting parameter URLs..."
           if [ -s recon_output/urls/AllURLs.txt ]; then
             # URLs with parameters (qsreplace FUZZ)
             cat recon_output/urls/AllURLs.txt \
               | grep '=' \
-              | qsreplace "FUZZ" \
-              | anew \
-              | tee recon_output/params/ParamURLs.txt
+              | qsreplace "FUZZ" 2>/dev/null \
+              | sort -u \
+              > recon_output/params/ParamURLs.txt || {
+                  echo "[!] qsreplace failed, using sed"
+                  cat recon_output/urls/AllURLs.txt \
+                    | grep '=' \
+                    | sed 's/=[^&]*/=FUZZ/g' \
+                    | sort -u > recon_output/params/ParamURLs.txt
+              }
             
             # All params
             cat recon_output/urls/AllURLs.txt \
               | grep '=' \
-              | anew \
-              > recon_output/params/params.txt
+              | sort -u > recon_output/params/params.txt || true
             
             # Clean params (remove values)
             cat recon_output/urls/AllURLs.txt \
               | grep '=' \
               | sed 's/=[^&]*/=/g' \
-              | tee recon_output/params/param.txt
+              > recon_output/params/param.txt || true
             
             PARAM_COUNT=$(wc -l < recon_output/params/ParamURLs.txt 2>/dev/null || echo 0)
             echo "param_urls=$PARAM_COUNT" >> $GITHUB_ENV
@@ -493,40 +526,62 @@ jobs:
       # ============================================
 
       - name: 🎯 Phase 4 - GF Patterns
+        shell: bash
         run: |
+          set +e
           echo "[*] Running GF pattern matching..."
           mkdir -p recon_output/gf_patterns
           
           if [ -s recon_output/urls/AllURLs.txt ]; then
             # XSS
-            cat recon_output/urls/AllURLs.txt | gf xss | uro > recon_output/gf_patterns/xss.txt 2>/dev/null || true
-            echo "[+] XSS patterns: $(wc -l < recon_output/gf_patterns/xss.txt 2>/dev/null || echo 0)"
+            cat recon_output/urls/AllURLs.txt | gf xss 2>/dev/null | uro 2>/dev/null > recon_output/gf_patterns/xss.txt || {
+                cat recon_output/urls/AllURLs.txt | gf xss 2>/dev/null | sort -u > recon_output/gf_patterns/xss.txt || true
+            }
+            echo "[+] XSS: $(wc -l < recon_output/gf_patterns/xss.txt 2>/dev/null || echo 0)"
             
             # SQLi
-            cat recon_output/urls/AllURLs.txt | gf sqli | uro > recon_output/gf_patterns/sqli.txt 2>/dev/null || true
-            echo "[+] SQLi patterns: $(wc -l < recon_output/gf_patterns/sqli.txt 2>/dev/null || echo 0)"
+            cat recon_output/urls/AllURLs.txt | gf sqli 2>/dev/null | uro 2>/dev/null > recon_output/gf_patterns/sqli.txt || {
+                cat recon_output/urls/AllURLs.txt | gf sqli 2>/dev/null | sort -u > recon_output/gf_patterns/sqli.txt || true
+            }
+            echo "[+] SQLi: $(wc -l < recon_output/gf_patterns/sqli.txt 2>/dev/null || echo 0)"
             
             # IDOR
-            cat recon_output/urls/AllURLs.txt | gf idor | uro > recon_output/gf_patterns/idor.txt 2>/dev/null || true
-            echo "[+] IDOR patterns: $(wc -l < recon_output/gf_patterns/idor.txt 2>/dev/null || echo 0)"
+            cat recon_output/urls/AllURLs.txt | gf idor 2>/dev/null | uro 2>/dev/null > recon_output/gf_patterns/idor.txt || {
+                cat recon_output/urls/AllURLs.txt | gf idor 2>/dev/null | sort -u > recon_output/gf_patterns/idor.txt || true
+            }
+            echo "[+] IDOR: $(wc -l < recon_output/gf_patterns/idor.txt 2>/dev/null || echo 0)"
             
             # SSRF
-            cat recon_output/urls/AllURLs.txt | gf ssrf | uro > recon_output/gf_patterns/ssrf.txt 2>/dev/null || true
-            echo "[+] SSRF patterns: $(wc -l < recon_output/gf_patterns/ssrf.txt 2>/dev/null || echo 0)"
+            cat recon_output/urls/AllURLs.txt | gf ssrf 2>/dev/null | uro 2>/dev/null > recon_output/gf_patterns/ssrf.txt || {
+                cat recon_output/urls/AllURLs.txt | gf ssrf 2>/dev/null | sort -u > recon_output/gf_patterns/ssrf.txt || true
+            }
+            echo "[+] SSRF: $(wc -l < recon_output/gf_patterns/ssrf.txt 2>/dev/null || echo 0)"
             
             # Redirect
-            cat recon_output/urls/AllURLs.txt | gf redirect | uro > recon_output/gf_patterns/redirect.txt 2>/dev/null || true
-            echo "[+] Redirect patterns: $(wc -l < recon_output/gf_patterns/redirect.txt 2>/dev/null || echo 0)"
+            cat recon_output/urls/AllURLs.txt | gf redirect 2>/dev/null | uro 2>/dev/null > recon_output/gf_patterns/redirect.txt || {
+                cat recon_output/urls/AllURLs.txt | gf redirect 2>/dev/null | sort -u > recon_output/gf_patterns/redirect.txt || true
+            }
+            echo "[+] Redirect: $(wc -l < recon_output/gf_patterns/redirect.txt 2>/dev/null || echo 0)"
             
             # LFI
-            cat recon_output/urls/AllURLs.txt | gf lfi | uro > recon_output/gf_patterns/lfi.txt 2>/dev/null || true
-            echo "[+] LFI patterns: $(wc -l < recon_output/gf_patterns/lfi.txt 2>/dev/null || echo 0)"
+            cat recon_output/urls/AllURLs.txt | gf lfi 2>/dev/null | uro 2>/dev/null > recon_output/gf_patterns/lfi.txt || {
+                cat recon_output/urls/AllURLs.txt | gf lfi 2>/dev/null | sort -u > recon_output/gf_patterns/lfi.txt || true
+            }
+            echo "[+] LFI: $(wc -l < recon_output/gf_patterns/lfi.txt 2>/dev/null || echo 0)"
             
             # RCE
-            cat recon_output/urls/AllURLs.txt | gf rce | uro > recon_output/gf_patterns/rce.txt 2>/dev/null || true
-            echo "[+] RCE patterns: $(wc -l < recon_output/gf_patterns/rce.txt 2>/dev/null || echo 0)"
+            cat recon_output/urls/AllURLs.txt | gf rce 2>/dev/null | uro 2>/dev/null > recon_output/gf_patterns/rce.txt || {
+                cat recon_output/urls/AllURLs.txt | gf rce 2>/dev/null | sort -u > recon_output/gf_patterns/rce.txt || true
+            }
+            echo "[+] RCE: $(wc -l < recon_output/gf_patterns/rce.txt 2>/dev/null || echo 0)"
           else
-            touch recon_output/gf_patterns/{xss,sqli,idor,ssrf,redirect,lfi,rce}.txt
+            touch recon_output/gf_patterns/xss.txt
+            touch recon_output/gf_patterns/sqli.txt
+            touch recon_output/gf_patterns/idor.txt
+            touch recon_output/gf_patterns/ssrf.txt
+            touch recon_output/gf_patterns/redirect.txt
+            touch recon_output/gf_patterns/lfi.txt
+            touch recon_output/gf_patterns/rce.txt
           fi
 
       # ============================================
@@ -534,7 +589,9 @@ jobs:
       # ============================================
 
       - name: 📈 Generate Summary
+        shell: bash
         run: |
+          set +e
           echo "========== RECON SUMMARY ==========" > recon_output/final/SUMMARY.txt
           echo "Date: $(date)" >> recon_output/final/SUMMARY.txt
           echo "Domains: ${{ github.event.inputs.domains }}" >> recon_output/final/SUMMARY.txt
@@ -559,7 +616,10 @@ jobs:
       # ============================================
 
       - name: 📤 Send to Discord
+        if: always()  # ✅ شغل حتى لو فيه errors
+        shell: bash
         run: |
+          set +e
           python3 << 'PYEOF'
           import os
           import requests
@@ -567,7 +627,7 @@ jobs:
           webhook = os.environ.get('DISCORD_WEBHOOK')
           if not webhook:
               print("[!] No webhook")
-              exit(1)
+              exit(0)  # Don't fail
           
           def count_lines(f):
               try:
@@ -604,14 +664,17 @@ jobs:
                   {"name": "📁 LFI", "value": f"`{stats['lfi']}`", "inline": True},
                   {"name": "⚡ RCE", "value": f"`{stats['rce']}`", "inline": True},
               ],
-              "footer": {"text": "Recon Pipeline v3.0"}
+              "footer": {"text": "Recon Pipeline v4.0"}
           }
           
-          payload = {"embeds": [embed]}
-          resp = requests.post(webhook, json=payload)
-          print(f"Summary sent: {resp.status_code}")
+          try:
+              payload = {"embeds": [embed]}
+              resp = requests.post(webhook, json=payload, timeout=30)
+              print(f"Summary sent: {resp.status_code}")
+          except Exception as e:
+              print(f"[!] Discord error: {e}")
           
-          # Send important files
+          # Send files
           import glob
           important_files = [
               'recon_output/final/SUMMARY.txt',
@@ -623,17 +686,22 @@ jobs:
           ]
           
           for filepath in important_files:
-              if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-                  with open(filepath, 'rb') as f:
-                      files = {'file': (os.path.basename(filepath), f)}
-                      resp = requests.post(webhook, files=files)
-                      print(f"Uploaded {filepath}: {resp.status_code}")
+              try:
+                  if os.path.exists(filepath) and os.path.getsize(filepath) > 0 and os.path.getsize(filepath) < 8*1024*1024:
+                      with open(filepath, 'rb') as f:
+                          files = {'file': (os.path.basename(filepath), f)}
+                          resp = requests.post(webhook, files=files, timeout=30)
+                          print(f"Uploaded {filepath}: {resp.status_code}")
+              except Exception as e:
+                  print(f"[!] Upload error for {filepath}: {e}")
           
           PYEOF
 
       - name: 📦 Upload Artifacts
+        if: always()  # ✅ شغل حتى لو فيه errors
         uses: actions/upload-artifact@v4
         with:
-          name: full-recon-v3-${{ github.run_id }}
+          name: full-recon-v4-${{ github.run_id }}
           path: recon_output/
           retention-days: 7
+          if-no-files-found: warn
