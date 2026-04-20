@@ -1,93 +1,255 @@
-name: Recon & Takeover + Discord Alert
+name: 🔍 Automated Recon Pipeline
 
 on:
-  schedule:
-    - cron: "0 */6 * * *"   # كل 6 ساعات
   workflow_dispatch:
+    inputs:
+      domains:
+        description: 'Domains (comma-separated)'
+        required: true
+        default: 'example.com'
+      discord_webhook:
+        description: 'Discord Webhook URL'
+        required: true
+
+env:
+  PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
+  DISCORD_WEBHOOK: ${{ github.event.inputs.discord_webhook }}
 
 jobs:
-  full-recon:
+  recon:
     runs-on: ubuntu-latest
-
+    
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.21'
 
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      - name: Install Tools
+      - name: Install dependencies
         run: |
-          set -e
           sudo apt-get update
-          sudo apt-get install -y wget unzip jq git curl dnsutils
+          sudo apt-get install -y jq git wget curl python3-pip unzip
+          
+          # Install Subfinder
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          
+          # Install Assetfinder
+          go install -v github.com/tomnomnom/assetfinder@latest
+          
+          # Install Findomain
+          wget https://github.com/findomain/findomain/releases/latest/download/findomain-linux.zip
+          unzip findomain-linux.zip
+          chmod +x findomain
+          sudo mv findomain /usr/local/bin/
+          
+          # Install Chaos
+          go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest
+          
+          # Install DNSScan
+          git clone https://github.com/rbsec/dnscan.git
+          pip3 install -r dnscan/requirements.txt
+          
+          # Install HTTPx
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          
+          # Install anew
+          go install -v github.com/tomnomnom/anew@latest
+          
+          # Install Sublist3r (optional fallback)
+          git clone https://github.com/aboul3la/Sublist3r.git
+          pip3 install -r Sublist3r/requirements.txt
+          
+          # Add Go binaries to PATH
+          echo "$HOME/go/bin" >> $GITHUB_PATH
 
-          go install github.com/projectdiscovery/httpx/cmd/httpx@latest && sudo mv ~/go/bin/httpx /usr/bin/
-          go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && sudo mv ~/go/bin/subfinder /usr/bin/
-          go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest && sudo mv ~/go/bin/dnsx /usr/bin/
-          go install github.com/tomnomnom/anew@latest && sudo mv ~/go/bin/anew /usr/bin/
-          go install github.com/cybercdh/assetfinder@latest && sudo mv ~/go/bin/assetfinder /usr/bin/
-          go install github.com/PentestPad/subzy@latest && sudo mv ~/go/bin/subzy /usr/bin/
+      - name: Create output directory
+        run: mkdir -p recon_output
 
-          LATEST=$(curl -s https://api.github.com/repos/projectdiscovery/nuclei/releases/latest | jq -r '.tag_name')
-          VER=${LATEST#v}
-          wget https://github.com/projectdiscovery/nuclei/releases/download/${LATEST}/nuclei_${VER}_linux_amd64.zip
-          unzip -o nuclei_${VER}_linux_amd64.zip
-          sudo mv nuclei /usr/bin/
-          chmod +x /usr/bin/nuclei
-
-      - name: Recon
-        env:
-          DOMAIN: ${{ secrets.DOMAIN }}
+      - name: Parse domains input
+        id: parse
         run: |
-          set -e
-          mkdir -p results/$DOMAIN
+          DOMAINS="${{ github.event.inputs.domains }}"
+          echo "domains=$DOMAINS" >> $GITHUB_OUTPUT
+          echo "$DOMAINS" | tr ',' '\n' | sed 's/ //g' > domains.txt
+          echo "[*] Target domains:"
+          cat domains.txt
 
-          echo "[*] Collecting subdomains..."
-          subfinder -d $DOMAIN -silent > new.txt
-          assetfinder $DOMAIN --subs-only >> new.txt
-          sort -u new.txt > all.txt
-
-          # مقارنة بالجديد
-          touch old.txt
-          cat all.txt | anew old.txt > diff.txt
-          cp all.txt old.txt
-
-          echo "[*] Live hosts..."
-          cat all.txt | httpx -silent -o results/$DOMAIN/httpx.txt
-
-          echo "[*] Takeover scan..."
-          subzy run --targets all.txt --hide_fails --vuln --output results/$DOMAIN/subzy.json
-
-          echo "[*] Nuclei scan..."
-          nuclei -l results/$DOMAIN/httpx.txt -silent -o results/$DOMAIN/nuclei.txt
-
-      - name: Send to Discord
-        if: always()
+      - name: 🔎 Run Subfinder
         run: |
-          WEBHOOK="${{ secrets.DISCORD_WEBHOOK }}"
+          echo "[*] Running Subfinder..."
+          while read domain; do
+            subfinder -d "$domain" -all -recursive -o "recon_output/subs_${domain}.txt" 2>/dev/null || true
+          done < domains.txt
+          cat recon_output/subs_*.txt 2>/dev/null | sort -u > recon_output/Subs01.txt
+          echo "[+] Subfinder found $(wc -l < recon_output/Subs01.txt 2>/dev/null || echo 0) subdomains"
 
-          if [ -s diff.txt ]; then
-            MSG=$(head -n 20 diff.txt)
+      - name: 🔎 Run Assetfinder
+        run: |
+          echo "[*] Running Assetfinder..."
+          while read domain; do
+            echo "$domain" | assetfinder --subs-only >> recon_output/Subs02_temp.txt 2>/dev/null || true
+          done < domains.txt
+          sort -u recon_output/Subs02_temp.txt > recon_output/Subs02.txt 2>/dev/null || touch recon_output/Subs02.txt
+          echo "[+] Assetfinder found $(wc -l < recon_output/Subs02.txt 2>/dev/null || echo 0) subdomains"
 
-            curl -H "Content-Type: application/json" \
-            -X POST \
-            -d "{\"content\":\"🔥 New Subdomains Found:\n$MSG\"}" \
-            $WEBHOOK
+      - name: 🔎 Run Findomain
+        run: |
+          echo "[*] Running Findomain..."
+          while read domain; do
+            findomain -t "$domain" -u "recon_output/subs_findomain_${domain}.txt" 2>/dev/null || true
+          done < domains.txt
+          cat recon_output/subs_findomain_*.txt 2>/dev/null | sort -u > recon_output/Subs05.txt
+          echo "[+] Findomain found $(wc -l < recon_output/Subs05.txt 2>/dev/null || echo 0) subdomains"
+
+      - name: 🔎 Run Chaos
+        run: |
+          echo "[*] Running Chaos..."
+          if [ -n "$PDCP_API_KEY" ]; then
+            while read domain; do
+              chaos -d "$domain" -o "recon_output/subs_chaos_${domain}.txt" 2>/dev/null || true
+            done < domains.txt
+            cat recon_output/subs_chaos_*.txt 2>/dev/null | sort -u > recon_output/Subs06.txt
+            echo "[+] Chaos found $(wc -l < recon_output/Subs06.txt 2>/dev/null || echo 0) subdomains"
           else
-            curl -H "Content-Type: application/json" \
-            -X POST \
-            -d "{\"content\":\"✅ No new subdomains found.\"}" \
-            $WEBHOOK
+            echo "[!] PDCP_API_KEY not set, skipping Chaos"
+            touch recon_output/Subs06.txt
           fi
 
-      - name: Save Results
+      - name: 🔎 Run crt.sh Passive Enumeration
         run: |
-          git config --global user.email "${{ secrets.EMAIL_ADDRESS }}"
-          git config --global user.name "${{ secrets.USER_NAME }}"
+          echo "[*] Running crt.sh passive scan..."
+          while read domain; do
+            curl -s "https://crt.sh/?q=%.${domain}&output=json" \
+              | jq -r '.[].name_value' 2>/dev/null \
+              | sed 's/\*\.//g' \
+              | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
+              >> recon_output/Subs_crt_temp.txt || true
+          done < domains.txt
+          sort -u recon_output/Subs_crt_temp.txt > recon_output/Subs_crt.txt 2>/dev/null || touch recon_output/Subs_crt.txt
+          echo "[+] crt.sh found $(wc -l < recon_output/Subs_crt.txt 2>/dev/null || echo 0) subdomains"
 
-          git add .
-          git commit -m "Auto Recon $(date -u)" || echo "No changes"
-          git push
+      - name: 🔎 Run URLScan Passive
+        run: |
+          echo "[*] Running URLScan passive scan..."
+          while read domain; do
+            curl -s "https://urlscan.io/api/v1/search/?q=domain:${domain}&size=1000" \
+              | jq -r '.results[]?.page?.domain' 2>/dev/null \
+              | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
+              >> recon_output/Subs_urlscan_temp.txt || true
+            sleep 2  # Rate limiting
+          done < domains.txt
+          sort -u recon_output/Subs_urlscan_temp.txt > recon_output/Subs_urlscan.txt 2>/dev/null || touch recon_output/Subs_urlscan.txt
+          echo "[+] URLScan found $(wc -l < recon_output/Subs_urlscan.txt 2>/dev/null || echo 0) subdomains"
+
+      - name: 🔎 Run Web Archive Passive
+        run: |
+          echo "[*] Running Web Archive passive scan..."
+          while read domain; do
+            curl -s "http://web.archive.org/cdx/search/cdx?url=*.${domain}/*&output=json&collapse=urlkey" \
+              | jq -r '.[1:][] | .[2]' 2>/dev/null \
+              | grep -Eo "([a-zA-Z0-9_-]+\.)?${domain}" \
+              >> recon_output/Subs_archive_temp.txt || true
+            sleep 1
+          done < domains.txt
+          sort -u recon_output/Subs_archive_temp.txt > recon_output/Subs_archive.txt 2>/dev/null || touch recon_output/Subs_archive.txt
+          echo "[+] Web Archive found $(wc -l < recon_output/Subs_archive.txt 2>/dev/null || echo 0) subdomains"
+
+      - name: 📊 Merge & Deduplicate
+        run: |
+          echo "[*] Merging all results..."
+          cat recon_output/Subs*.txt recon_output/subs_*.txt 2>/dev/null \
+            | grep -E "^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$" \
+            | sort -u \
+            | anew recon_output/AllSubs.txt
+          
+          TOTAL=$(wc -l < recon_output/AllSubs.txt)
+          echo "[+] Total unique subdomains: $TOTAL"
+          echo "total_subs=$TOTAL" >> $GITHUB_ENV
+
+      - name: 🌐 HTTPx Probing
+        run: |
+          echo "[*] Running HTTPx on discovered subdomains..."
+          if [ -s recon_output/AllSubs.txt ]; then
+            httpx -l recon_output/AllSubs.txt \
+              -status-code \
+              -content-length \
+              -web-server \
+              -title \
+              -follow-redirects \
+              -o recon_output/httpx_results.txt \
+              -silent 2>/dev/null || true
+            
+            ALIVE=$(wc -l < recon_output/httpx_results.txt 2>/dev/null || echo 0)
+            echo "[+] Alive hosts: $ALIVE"
+            echo "alive_hosts=$ALIVE" >> $GITHUB_ENV
+          else
+            echo "[!] No subdomains found"
+            touch recon_output/httpx_results.txt
+            echo "alive_hosts=0" >> $GITHUB_ENV
+          fi
+
+      - name: 📤 Send Results to Discord
+        run: |
+          python3 << 'EOF'
+          import os
+          import json
+          import requests
+          
+          webhook = os.environ.get('DISCORD_WEBHOOK')
+          if not webhook:
+              print("[!] No Discord webhook provided")
+              exit(1)
+          
+          total = os.environ.get('total_subs', '0')
+          alive = os.environ.get('alive_hosts', '0')
+          domains = os.environ.get('DOMAINS', 'unknown')
+          
+          # Create summary embed
+          embed = {
+              "title": "🔍 Recon Complete",
+              "description": f"**Domains:** {domains}\n**Total Subdomains:** {total}\n**Alive Hosts:** {alive}",
+              "color": 0x00ff00,
+              "timestamp": requests.get("http://worldtimeapi.org/api/ip").json().get('datetime', '') if False else '',
+              "fields": []
+          }
+          
+          # Read files for details
+          files_to_attach = []
+          
+          # Summary message
+          payload = {
+              "content": f"🎯 **Recon Results for:** `{domains}`\n📊 **Total Subdomains:** `{total}`\n🌐 **Alive Hosts:** `{alive}`",
+              "embeds": [embed]
+          }
+          
+          # Send initial message
+          response = requests.post(webhook, json=payload)
+          print(f"Discord response: {response.status_code}")
+          
+          # Upload files if they exist
+          import glob
+          for file in glob.glob('recon_output/*.txt'):
+              if os.path.getsize(file) > 0:
+                  with open(file, 'rb') as f:
+                      files = {'file': (os.path.basename(file), f)}
+                      resp = requests.post(webhook, files=files)
+                      print(f"Uploaded {file}: {resp.status_code}")
+          
+          EOF
+        env:
+          DOMAINS: ${{ github.event.inputs.domains }}
+
+      - name: 📦 Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: recon-results-${{ github.run_id }}
+          path: recon_output/
+          retention-days: 7
