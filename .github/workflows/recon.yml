@@ -1,32 +1,392 @@
-      - name: 📤 Discord Notification - ALL FILES
+name: 🔍 Full Recon Pipeline v6 (Working)
+
+on:
+  workflow_dispatch:
+    inputs:
+      domains:
+        description: 'Domains (comma-separated, NO http/https)'
+        required: true
+        default: 'example.com'
+      discord_webhook:
+        description: 'Discord Webhook URL'
+        required: true
+      depth:
+        description: 'Crawling depth (1-5)'
+        required: false
+        default: '3'
+
+env:
+  PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
+  DISCORD_WEBHOOK: ${{ github.event.inputs.discord_webhook }}
+  CRAWL_DEPTH: ${{ github.event.inputs.depth }}
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    continue-on-error: true
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Install all tools
+        id: install
+        shell: bash
+        run: |
+          set +e
+          sudo apt-get update || true
+          sudo apt-get install -y jq git wget curl python3-pip unzip ruby-full snapd build-essential || true
+          
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          export PATH=$PATH:$HOME/go/bin:$HOME/.cargo/bin
+          
+          # Core tools
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest || true
+          go install -v github.com/tomnomnom/assetfinder@latest || true
+          go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest || true
+          go install -v github.com/tomnomnom/waybackurls@latest || true
+          go install -v github.com/lc/gau/v2/cmd/gau@latest || true
+          go install -v github.com/bp0lr/gauplus@latest || true
+          go install -v github.com/projectdiscovery/katana/cmd/katana@latest || true
+          go install -v github.com/hakluke/hakrawler@latest || true
+          go install -v github.com/jaeles-project/gospider@latest || true
+          go install -v github.com/tomnomnom/anew@latest || true
+          go install -v github.com/tomnomnom/unfurl@latest || true
+          go install -v github.com/tomnomnom/gf@latest || true
+          go install -v github.com/s0md3v/uro@latest || true
+          go install -v github.com/tomnomnom/qsreplace@latest || true
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest || true
+          
+          # Findomain
+          wget -q https://github.com/findomain/findomain/releases/latest/download/findomain-linux.zip || true
+          unzip -q findomain-linux.zip 2>/dev/null && chmod +x findomain && sudo mv findomain /usr/local/bin/ || true
+          
+          # Amass
+          sudo snap install amass 2>/dev/null || true
+          sudo ln -s /snap/bin/amass /usr/local/bin/amass 2>/dev/null || true
+          
+          # Waymore
+          pip3 install waymore 2>/dev/null || true
+          
+          # ParamSpider
+          pip3 install git+https://github.com/devanshbatham/ParamSpider.git 2>/dev/null || true
+          
+          # Arjun
+          pip3 install arjun 2>/dev/null || true
+          
+          # x8
+          cargo install x8 2>/dev/null || {
+              wget -q "https://github.com/Sh1Yo/x8/releases/latest/download/x8-linux-x86_64.tar.gz" -O /tmp/x8.tar.gz || true
+              cd /tmp && tar -xzf x8.tar.gz 2>/dev/null || true
+              [ -f x8 ] && sudo mv x8 /usr/local/bin/ || true
+              [ -f x8-linux-x86_64 ] && sudo mv x8-linux-x86_64 /usr/local/bin/x8 || true
+              cd -
+          }
+          
+          # GF patterns
+          mkdir -p ~/.gf
+          git clone https://github.com/1ndianl33t/Gf-Patterns.git /tmp/Gf-Patterns 2>/dev/null || true
+          cp /tmp/Gf-Patterns/*.json ~/.gf/ 2>/dev/null || true
+          
+          echo "[+] Done"
+
+      - name: Create directories
+        run: mkdir -p recon_output/{subs,urls,params,gf_patterns,final}
+
+      - name: Parse domains
+        shell: bash
+        run: |
+          set +e
+          # Clean domains - remove http/https and www
+          echo "${{ github.event.inputs.domains }}" | tr ',' '\n' | sed 's/ //g' | sed 's|^https\?://||' | sed 's|^www\.||' | sort -u > domains.txt
+          echo "[*] Target domains:"
+          cat domains.txt
+
+      # ============================================
+      # PHASE 1: SUBDOMAIN ENUMERATION
+      # ============================================
+
+      - name: 🔎 Subdomain Enumeration
+        shell: bash
+        run: |
+          set +e
+          echo "[*] Phase 1: Subdomain Enumeration"
+          
+          while read domain; do
+            [ -z "$domain" ] && continue
+            echo "[*] Scanning: $domain"
+            
+            # Subfinder
+            subfinder -d "$domain" -all -recursive -silent 2>/dev/null >> recon_output/subs/all_subfinder.txt || true
+            
+            # Assetfinder
+            echo "$domain" | assetfinder --subs-only 2>/dev/null >> recon_output/subs/all_assetfinder.txt || true
+            
+            # Findomain
+            findomain -t "$domain" -q 2>/dev/null >> recon_output/subs/all_findomain.txt || true
+            
+            # Chaos
+            [ -n "$PDCP_API_KEY" ] && chaos -d "$domain" -silent 2>/dev/null >> recon_output/subs/all_chaos.txt || true
+            
+            # Amass
+            amass enum -passive -d "$domain" -silent 2>/dev/null >> recon_output/subs/all_amass.txt || true
+            
+            # crt.sh
+            curl -s "https://crt.sh/?q=%25.${domain}&output=json" \
+              | jq -r '.[].name_value' 2>/dev/null \
+              | sed 's/\*\.//g' \
+              | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
+              >> recon_output/subs/all_crt.txt || true
+            
+            # URLScan
+            curl -s "https://urlscan.io/api/v1/search/?q=domain:${domain}&size=1000" \
+              | jq -r '.results[]?.page?.domain' 2>/dev/null \
+              | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
+              >> recon_output/subs/all_urlscan.txt || true
+            sleep 2
+            
+          done < domains.txt
+          
+          # Merge all subdomains
+          cat recon_output/subs/all_*.txt 2>/dev/null \
+            | grep -E "^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$" \
+            | sort -u > recon_output/subs/AllSubs.txt
+          
+          echo "[+] Total Subdomains: $(wc -l < recon_output/subs/AllSubs.txt)"
+
+      - name: 🌐 HTTPx Probing
+        shell: bash
+        run: |
+          set +e
+          echo "[*] Phase 2: HTTPx Probing"
+          
+          if [ -s recon_output/subs/AllSubs.txt ]; then
+            httpx -l recon_output/subs/AllSubs.txt \
+              -status-code \
+              -content-length \
+              -web-server \
+              -title \
+              -follow-redirects \
+              -silent \
+              -o recon_output/subs/AliveSubs_full.txt 2>/dev/null || true
+            
+            # Extract just the URLs for next steps
+            awk '{print $1}' recon_output/subs/AliveSubs_full.txt 2>/dev/null | sort -u > recon_output/subs/AliveSubs.txt || true
+            
+            ALIVE=$(wc -l < recon_output/subs/AliveSubs.txt 2>/dev/null || echo 0)
+            echo "[+] Alive hosts: $ALIVE"
+          else
+            touch recon_output/subs/AliveSubs.txt
+            echo "[!] No subdomains to probe"
+          fi
+
+      # ============================================
+      # PHASE 2: URL EXTRACTION
+      # ============================================
+
+      - name: 🔗 URL Extraction
+        shell: bash
+        run: |
+          set +e
+          echo "[*] Phase 3: URL Extraction"
+          
+          if [ -s recon_output/subs/AliveSubs.txt ]; then
+            # Waybackurls
+            cat recon_output/subs/AliveSubs.txt | waybackurls 2>/dev/null >> recon_output/urls/all_wayback.txt || true
+            echo "[+] Waybackurls: $(wc -l < recon_output/urls/all_wayback.txt 2>/dev/null || echo 0)"
+            
+            # Gau
+            cat recon_output/subs/AliveSubs.txt | gau --threads 200 2>/dev/null >> recon_output/urls/all_gau.txt || true
+            echo "[+] Gau: $(wc -l < recon_output/urls/all_gau.txt 2>/dev/null || echo 0)"
+            
+            # Gauplus
+            gauplus -t 200 -random-agent < recon_output/subs/AliveSubs.txt 2>/dev/null >> recon_output/urls/all_gauplus.txt || true
+            echo "[+] Gauplus: $(wc -l < recon_output/urls/all_gauplus.txt 2>/dev/null || echo 0)"
+            
+            # Waymore
+            waymore -i recon_output/subs/AliveSubs.txt -mode U -l 1000 -from 2021 -oU recon_output/urls/all_waymore.txt 2>/dev/null || true
+            echo "[+] Waymore: $(wc -l < recon_output/urls/all_waymore.txt 2>/dev/null || echo 0)"
+            
+            # Hakrawler
+            cat recon_output/subs/AliveSubs.txt | hakrawler -subs -u -insecure 2>/dev/null >> recon_output/urls/all_hakrawler.txt || true
+            echo "[+] Hakrawler: $(wc -l < recon_output/urls/all_hakrawler.txt 2>/dev/null || echo 0)"
+            
+            # Katana
+            katana -list recon_output/subs/AliveSubs.txt \
+              -jc -kf all -d ${{ env.CRAWL_DEPTH }} \
+              -fx -aff -fs rdn -f url -silent 2>/dev/null >> recon_output/urls/all_katana.txt || true
+            echo "[+] Katana: $(wc -l < recon_output/urls/all_katana.txt 2>/dev/null || echo 0)"
+            
+            # Gospider
+            gospider -S recon_output/subs/AliveSubs.txt -t 20 -d ${{ env.CRAWL_DEPTH }} --js --sitemap --robots 2>/dev/null \
+              | sed -n 's/.*\(https:\/\/[^ ]*\).*/\1/p' \
+              >> recon_output/urls/all_gospider.txt || true
+            echo "[+] Gospider: $(wc -l < recon_output/urls/all_gospider.txt 2>/dev/null || echo 0)"
+            
+          else
+            echo "[!] No alive hosts for URL extraction"
+            touch recon_output/urls/all_{wayback,gau,gauplus,waymore,hakrawler,katana,gospider}.txt
+          fi
+          
+          # Merge all URLs
+          cat recon_output/urls/all_*.txt 2>/dev/null \
+            | grep -E "^https?://" \
+            | sort -u > recon_output/urls/AllURLs.txt || true
+          
+          echo "[+] Total URLs: $(wc -l < recon_output/urls/AllURLs.txt 2>/dev/null || echo 0)"
+
+      - name: 🔗 ParamSpider & X8
+        shell: bash
+        run: |
+          set +e
+          echo "[*] Phase 4: ParamSpider & X8"
+          
+          # ParamSpider - run on domains (not URLs)
+          if command -v paramspider &> /dev/null; then
+            echo "[*] Running ParamSpider..."
+            while read domain; do
+              [ -z "$domain" ] && continue
+              
+              # ParamSpider outputs to results/ directory by default
+              paramspider -d "$domain" --exclude woff,css,js,png,svg,jpg,ico,pdf 2>/dev/null || true
+              
+              # Copy results if they exist
+              if [ -f "results/${domain}.txt" ]; then
+                cat "results/${domain}.txt" >> recon_output/urls/all_paramspider.txt || true
+              fi
+            done < domains.txt
+          fi
+          
+          # X8 - run on individual URLs, not list
+          if command -v x8 &> /dev/null && [ -s recon_output/urls/AllURLs.txt ]; then
+            echo "[*] Running X8 on sample URLs..."
+            # X8 works best on single URLs, so take first 50
+            head -50 recon_output/urls/AllURLs.txt | while read url; do
+              x8 -u "$url" -w <(echo -e "id\npage\nfile\nurl\npath\ndir\nview\ncontent\naction\ncallback\nredirect") 2>/dev/null >> recon_output/urls/all_x8.txt || true
+            done
+          fi
+          
+          # Merge ParamSpider results
+          cat recon_output/urls/all_paramspider.txt 2>/dev/null | sort -u >> recon_output/urls/AllURLs.txt || true
+          
+          # Re-deduplicate
+          sort -u recon_output/urls/AllURLs.txt > recon_output/urls/AllURLs_unique.txt 2>/dev/null || true
+          mv recon_output/urls/AllURLs_unique.txt recon_output/urls/AllURLs.txt 2>/dev/null || true
+          
+          echo "[+] Final URLs: $(wc -l < recon_output/urls/AllURLs.txt 2>/dev/null || echo 0)"
+
+      # ============================================
+      # PHASE 3: PARAMETER EXTRACTION
+      # ============================================
+
+      - name: 🔧 Parameter Extraction
+        shell: bash
+        run: |
+          set +e
+          echo "[*] Phase 5: Parameter Extraction"
+          
+          if [ -s recon_output/urls/AllURLs.txt ]; then
+            # URLs with = sign
+            grep '=' recon_output/urls/AllURLs.txt > recon_output/params/urls_with_params.txt 2>/dev/null || true
+            
+            # FUZZ version
+            cat recon_output/params/urls_with_params.txt \
+              | qsreplace "FUZZ" 2>/dev/null \
+              | sort -u > recon_output/params/ParamURLs.txt || {
+                  sed 's/=[^&]*/=FUZZ/g' recon_output/params/urls_with_params.txt | sort -u > recon_output/params/ParamURLs.txt
+              }
+            
+            # Clean params
+            sed 's/=[^&]*/=/g' recon_output/params/urls_with_params.txt | sort -u > recon_output/params/param.txt || true
+            
+            echo "[+] Parameter URLs: $(wc -l < recon_output/params/ParamURLs.txt 2>/dev/null || echo 0)"
+          else
+            touch recon_output/params/{ParamURLs.txt,param.txt,urls_with_params.txt}
+          fi
+
+      # ============================================
+      # PHASE 4: GF PATTERN MATCHING
+      # ============================================
+
+      - name: 🎯 GF Patterns
+        shell: bash
+        run: |
+          set +e
+          echo "[*] Phase 6: GF Pattern Matching"
+          mkdir -p recon_output/gf_patterns
+          
+          if [ -s recon_output/urls/AllURLs.txt ]; then
+            for pattern in xss sqli idor ssrf redirect lfi rce ssti debug; do
+              echo "[*] Checking $pattern..."
+              cat recon_output/urls/AllURLs.txt | gf "$pattern" 2>/dev/null | sort -u > "recon_output/gf_patterns/${pattern}.txt" || true
+              echo "[+] $pattern: $(wc -l < "recon_output/gf_patterns/${pattern}.txt" 2>/dev/null || echo 0)"
+            done
+          else
+            for pattern in xss sqli idor ssrf redirect lfi rce ssti debug; do
+              touch "recon_output/gf_patterns/${pattern}.txt"
+            done
+          fi
+
+      # ============================================
+      # SUMMARY & DISCORD
+      # ============================================
+
+      - name: 📈 Generate Summary
+        shell: bash
+        run: |
+          set +e
+          {
+            echo "========== RECON SUMMARY =========="
+            echo "Date: $(date)"
+            echo "Domains: ${{ github.event.inputs.domains }}"
+            echo ""
+            echo "[+] Total Subdomains: $(wc -l < recon_output/subs/AllSubs.txt 2>/dev/null || echo 0)"
+            echo "[+] Alive Hosts: $(wc -l < recon_output/subs/AliveSubs.txt 2>/dev/null || echo 0)"
+            echo "[+] Total URLs: $(wc -l < recon_output/urls/AllURLs.txt 2>/dev/null || echo 0)"
+            echo "[+] Parameter URLs: $(wc -l < recon_output/params/ParamURLs.txt 2>/dev/null || echo 0)"
+            echo ""
+            for f in recon_output/gf_patterns/*.txt; do
+              [ -f "$f" ] && echo "[+] $(basename $f | cut -d. -f1): $(wc -l < "$f")"
+            done
+          } > recon_output/final/SUMMARY.txt
+          
+          cat recon_output/final/SUMMARY.txt
+
+      - name: 📤 Discord Notification
         if: always()
         shell: bash
         run: |
           set +e
           python3 << 'PYEOF'
-          import os
-          import requests
-          import glob
+          import os, requests
           
           webhook = os.environ.get('DISCORD_WEBHOOK')
           if not webhook:
-              print("[!] No webhook")
-              exit(0)
+              print("[!] No webhook"); exit(0)
           
           def count(f):
               try:
-                  with open(f) as file: 
-                      return len(file.readlines())
-              except: 
-                  return 0
+                  with open(f) as file: return len(file.readlines())
+              except: return 0
           
-          def file_size_mb(f):
-              try:
-                  return os.path.getsize(f) / (1024 * 1024)
-              except:
-                  return 0
-          
-          # Collect stats
           stats = {
               "subs": count('recon_output/subs/AllSubs.txt'),
               "alive": count('recon_output/subs/AliveSubs.txt'),
@@ -37,10 +397,8 @@
           for pattern in ['xss','sqli','idor','ssrf','redirect','lfi','rce','ssti','debug']:
               stats[pattern] = count(f'recon_output/gf_patterns/{pattern}.txt')
           
-          # Main summary embed
           embed = {
-              "title": "🔍 Full Recon Complete - All Files Attached",
-              "description": f"**Domains:** `{os.environ.get('DOMAINS', 'N/A')}`\n**Total Files:** Will be sent below",
+              "title": "🔍 Recon Complete",
               "color": 0x00ff00,
               "fields": [
                   {"name": "📊 Subdomains", "value": f"Total: `{stats['subs']}`\nAlive: `{stats['alive']}`", "inline": True},
@@ -52,111 +410,33 @@
                   {"name": "↩️ Redirect", "value": f"`{stats['redirect']}`", "inline": True},
                   {"name": "📁 LFI", "value": f"`{stats['lfi']}`", "inline": True},
                   {"name": "⚡ RCE", "value": f"`{stats['rce']}`", "inline": True},
-              ],
-              "footer": {"text": "Recon Pipeline v6.1 - All Files Mode"}
+              ]
           }
           
           try:
               resp = requests.post(webhook, json={"embeds": [embed]}, timeout=30)
-              print(f"[+] Summary sent: {resp.status_code}")
+              print(f"Sent: {resp.status_code}")
           except Exception as e:
-              print(f"[!] Summary error: {e}")
+              print(f"Error: {e}")
           
-          # ============================================
-          # SEND ALL FILES FROM ALL DIRECTORIES
-          # ============================================
-          
-          print("[*] Scanning for all output files...")
-          
-          # All directories to scan
-          scan_dirs = [
-              'recon_output/subs/',
-              'recon_output/urls/',
-              'recon_output/params/',
-              'recon_output/gf_patterns/',
-              'recon_output/final/',
-          ]
-          
-          # Collect all .txt files
-          all_files = []
-          for directory in scan_dirs:
-              if os.path.exists(directory):
-                  txt_files = glob.glob(f"{directory}*.txt")
-                  all_files.extend(txt_files)
-          
-          # Sort by directory then filename
-          all_files.sort()
-          
-          print(f"[+] Found {len(all_files)} files to upload")
-          
-          # Discord limit: 8MB per file, 10 files per message
-          MAX_FILE_SIZE = 8 * 1024 * 1024  # 8MB
-          FILES_PER_BATCH = 5
-          
-          successful = 0
-          failed = 0
-          skipped = 0
-          
-          for i, filepath in enumerate(all_files, 1):
+          # Upload files
+          for filepath in ['recon_output/final/SUMMARY.txt', 'recon_output/gf_patterns/xss.txt', 'recon_output/gf_patterns/sqli.txt']:
               try:
-                  size_mb = file_size_mb(filepath)
-                  filename = os.path.basename(filepath)
-                  
-                  # Skip empty files
-                  if os.path.getsize(filepath) == 0:
-                      print(f"[-] [{i}/{len(all_files)}] Skipping empty: {filename}")
-                      skipped += 1
-                      continue
-                  
-                  # Skip large files (>8MB)
-                  if os.path.getsize(filepath) > MAX_FILE_SIZE:
-                      print(f"[-] [{i}/{len(all_files)}] Skipping large ({size_mb:.1f}MB): {filename}")
-                      skipped += 1
-                      continue
-                  
-                  # Send file
-                  with open(filepath, 'rb') as f:
-                      # Send with description
-                      payload = {
-                          "content": f"📄 **{filename}** (`{size_mb:.2f} MB`) | `{filepath}`"
-                      }
-                      files = {'file': (filename, f)}
-                      
-                      resp = requests.post(webhook, data=payload, files=files, timeout=60)
-                      
-                      if resp.status_code in [200, 204]:
-                          print(f"[+] [{i}/{len(all_files)}] Sent: {filename} ({size_mb:.2f}MB)")
-                          successful += 1
-                      else:
-                          print(f"[!] [{i}/{len(all_files)}] Failed {resp.status_code}: {filename}")
-                          failed += 1
-                  
-                  # Small delay to avoid rate limiting
-                  import time
-                  time.sleep(1)
-                  
+                  if os.path.exists(filepath) and 0 < os.path.getsize(filepath) < 8*1024*1024:
+                      with open(filepath, 'rb') as f:
+                          files = {'file': (os.path.basename(filepath), f)}
+                          resp = requests.post(webhook, files=files, timeout=30)
+                          print(f"Uploaded {filepath}: {resp.status_code}")
               except Exception as e:
-                  print(f"[!] [{i}/{len(all_files)}] Error with {filepath}: {e}")
-                  failed += 1
-          
-          # Final summary message
-          final_msg = {
-              "content": f"""
-              ✅ **Upload Complete!**
-              📁 Total Files: `{len(all_files)}`
-              ✅ Successful: `{successful}`
-              ❌ Failed: `{failed}`
-              ⏭️ Skipped (empty/large): `{skipped}`
-              """
-          }
-          
-          try:
-              requests.post(webhook, json=final_msg, timeout=30)
-          except:
-              pass
-          
-          print(f"\n[+] Done! Successful: {successful}, Failed: {failed}, Skipped: {skipped}")
+                  print(f"Upload error: {e}")
           
           PYEOF
-        env:
-          DOMAINS: ${{ github.event.inputs.domains }}
+
+      - name: 📦 Upload Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recon-v6-${{ github.run_id }}
+          path: recon_output/
+          retention-days: 7
+          if-no-files-found: warn
