@@ -1,170 +1,27 @@
-name: 🔍 Full Recon Pipeline v7 (Parallel)
+name: 🔍 Automated Recon Pipeline
 
 on:
   workflow_dispatch:
     inputs:
       domains:
-        description: 'Domains (comma-separated, NO http/https)'
+        description: 'Domains (comma-separated)'
         required: true
         default: 'example.com'
       discord_webhook:
         description: 'Discord Webhook URL'
         required: true
-      depth:
-        description: 'Crawling depth (1-5)'
-        required: false
-        default: '3'
 
 env:
   PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
   DISCORD_WEBHOOK: ${{ github.event.inputs.discord_webhook }}
-  CRAWL_DEPTH: ${{ github.event.inputs.depth }}
 
 jobs:
-  # ============================================
-  # JOB 1: Subdomain Enumeration (أسرع job)
-  # ============================================
-  subdomain-enum:
+  recon:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    outputs:
-      subs-artifact: ${{ steps.upload.outputs.artifact-id }}
+    
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-
-      - name: Install Tools
-        run: |
-          set +e
-          sudo apt-get update -qq && sudo apt-get install -y -qq jq git wget curl unzip
-          echo "$HOME/go/bin" >> $GITHUB_PATH
-          export PATH=$PATH:$HOME/go/bin
-
-          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-          go install -v github.com/tomnomnom/assetfinder@latest
-          go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest
-          go install -v github.com/tomnomnom/anew@latest
-
-          wget -q https://github.com/findomain/findomain/releases/latest/download/findomain-linux.zip
-          unzip -q findomain-linux.zip && chmod +x findomain && sudo mv findomain /usr/local/bin/
-
-      - name: Parse Domains
-        run: |
-          echo "${{ github.event.inputs.domains }}" | tr ',' '\n' | sed 's/ //g; s|^https\?://||; s|^www\.||' | sort -u > domains.txt
-
-      - name: 🔎 Subdomain Enumeration
-        run: |
-          set +e
-          mkdir -p recon_output/subs
-
-          while read domain; do
-            [ -z "$domain" ] && continue
-            echo "[*] Scanning: $domain"
-
-            # Parallel tools using background jobs
-            subfinder -d "$domain" -all -recursive -silent > "recon_output/subs/${domain}_subfinder.txt" 2>/dev/null &
-            echo "$domain" | assetfinder --subs-only > "recon_output/subs/${domain}_assetfinder.txt" 2>/dev/null &
-            findomain -t "$domain" -q > "recon_output/subs/${domain}_findomain.txt" 2>/dev/null &
-            [ -n "$PDCP_API_KEY" ] && chaos -d "$domain" -silent > "recon_output/subs/${domain}_chaos.txt" 2>/dev/null &
-
-            # crt.sh (API call)
-            curl -s "https://crt.sh/?q=%25.${domain}&output=json" \
-              | jq -r '.[].name_value' 2>/dev/null \
-              | sed 's/\*\.//g' \
-              | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
-              > "recon_output/subs/${domain}_crt.txt" &
-
-            wait  # Wait for all background jobs
-            sleep 1
-          done < domains.txt
-
-          # Merge all
-          cat recon_output/subs/*.txt 2>/dev/null \
-            | grep -E "^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$" \
-            | sort -u > recon_output/subs/AllSubs.txt
-
-          echo "[+] Total Subdomains: $(wc -l < recon_output/subs/AllSubs.txt)"
-
-      - name: Upload Subdomains Artifact
-        id: upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: subs-${{ github.run_id }}
-          path: recon_output/subs/
-          retention-days: 1
-
-  # ============================================
-  # JOB 2: HTTPx Probing (يعتمد على Job 1)
-  # ============================================
-  httpx-probe:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: subdomain-enum
-    outputs:
-      alive-artifact: ${{ steps.upload.outputs.artifact-id }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-
-      - name: Install HTTPx
-        run: |
-          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-
-      - name: Download Subdomains
-        uses: actions/download-artifact@v4
-        with:
-          name: subs-${{ github.run_id }}
-          path: recon_output/subs/
-
-      - name: 🌐 HTTPx Probing
-        run: |
-          set +e
-          mkdir -p recon_output/subs
-
-          if [ -s recon_output/subs/AllSubs.txt ]; then
-            httpx -l recon_output/subs/AllSubs.txt \
-              -status-code \
-              -content-length \
-              -web-server \
-              -title \
-              -follow-redirects \
-              -silent \
-              -threads 200 \
-              -o recon_output/subs/AliveSubs_full.txt
-
-            awk '{print $1}' recon_output/subs/AliveSubs_full.txt | sort -u > recon_output/subs/AliveSubs.txt
-            echo "[+] Alive hosts: $(wc -l < recon_output/subs/AliveSubs.txt)"
-          else
-            touch recon_output/subs/AliveSubs.txt
-          fi
-
-      - name: Upload Alive Hosts
-        id: upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: alive-${{ github.run_id }}
-          path: recon_output/subs/AliveSubs.txt
-          retention-days: 1
-
-  # ============================================
-  # JOB 3: URL Extraction (يعتمد على Job 2)
-  # ============================================
-  url-extraction:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    needs: httpx-probe
-    outputs:
-      urls-artifact: ${{ steps.upload.outputs.artifact-id }}
-    steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -176,216 +33,223 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Tools
+      - name: Install dependencies
         run: |
-          set +e
-          sudo apt-get update -qq && sudo apt-get install -y -qq git wget curl python3-pip unzip
+          sudo apt-get update
+          sudo apt-get install -y jq git wget curl python3-pip unzip
+          
+          # Install Subfinder
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          
+          # Install Assetfinder
+          go install -v github.com/tomnomnom/assetfinder@latest
+          
+          # Install Findomain
+          wget https://github.com/findomain/findomain/releases/latest/download/findomain-linux.zip
+          unzip findomain-linux.zip
+          chmod +x findomain
+          sudo mv findomain /usr/local/bin/
+          
+          # Install Chaos
+          go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest
+          
+          # Install DNSScan
+          git clone https://github.com/rbsec/dnscan.git
+          pip3 install -r dnscan/requirements.txt
+          
+          # Install HTTPx
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          
+          # Install anew
+          go install -v github.com/tomnomnom/anew@latest
+          
+          # Install Sublist3r (optional fallback)
+          git clone https://github.com/aboul3la/Sublist3r.git
+          pip3 install -r Sublist3r/requirements.txt
+          
+          # Add Go binaries to PATH
           echo "$HOME/go/bin" >> $GITHUB_PATH
-          export PATH=$PATH:$HOME/go/bin
 
-          go install -v github.com/tomnomnom/waybackurls@latest
-          go install -v github.com/lc/gau/v2/cmd/gau@latest
-          go install -v github.com/bp0lr/gauplus@latest
-          go install -v github.com/projectdiscovery/katana/cmd/katana@latest
-          go install -v github.com/hakluke/hakrawler@latest
-          go install -v github.com/jaeles-project/gospider@latest
-          go install -v github.com/tomnomnom/qsreplace@latest
-          go install -v github.com/tomnomnom/gf@latest
-          go install -v github.com/s0md3v/uro@latest
+      - name: Create output directory
+        run: mkdir -p recon_output
 
-          pip3 install waymore paramspider arjun
-
-          # GF patterns
-          mkdir -p ~/.gf
-          git clone --depth 1 https://github.com/1ndianl33t/Gf-Patterns.git /tmp/Gf-Patterns 2>/dev/null || true
-          cp /tmp/Gf-Patterns/*.json ~/.gf/ 2>/dev/null || true
-
-      - name: Download Alive Hosts
-        uses: actions/download-artifact@v4
-        with:
-          name: alive-${{ github.run_id }}
-          path: recon_output/subs/
-
-      - name: 🔗 URL Extraction (Parallel)
+      - name: Parse domains input
+        id: parse
         run: |
-          set +e
-          mkdir -p recon_output/urls
+          DOMAINS="${{ github.event.inputs.domains }}"
+          echo "domains=$DOMAINS" >> $GITHUB_OUTPUT
+          echo "$DOMAINS" | tr ',' '\n' | sed 's/ //g' > domains.txt
+          echo "[*] Target domains:"
+          cat domains.txt
 
-          if [ ! -s recon_output/subs/AliveSubs.txt ]; then
-            echo "[!] No alive hosts"
-            touch recon_output/urls/AllURLs.txt
-            exit 0
-          fi
-
-          # Run tools in parallel (background jobs)
-          cat recon_output/subs/AliveSubs.txt | waybackurls > recon_output/urls/all_wayback.txt 2>/dev/null &
-          cat recon_output/subs/AliveSubs.txt | gau --threads 100 > recon_output/urls/all_gau.txt 2>/dev/null &
-          gauplus -t 100 -random-agent < recon_output/subs/AliveSubs.txt > recon_output/urls/all_gauplus.txt 2>/dev/null &
-
-          # Waymore (limit output)
-          waymore -i recon_output/subs/AliveSubs.txt -mode U -l 500 -from 2022 -oU recon_output/urls/all_waymore.txt 2>/dev/null &
-
-          # Katana (limit depth)
-          katana -list recon_output/subs/AliveSubs.txt \
-            -jc -kf all -d ${{ env.CRAWL_DEPTH }} \
-            -fx -aff -fs rdn -f url -silent -nc 2>/dev/null > recon_output/urls/all_katana.txt &
-
-          wait  # Wait for all
-
-          # Merge
-          cat recon_output/urls/all_*.txt 2>/dev/null \
-            | grep -E "^https?://" \
-            | sort -u > recon_output/urls/AllURLs.txt
-
-          echo "[+] Total URLs: $(wc -l < recon_output/urls/AllURLs.txt)"
-
-      - name: 🔧 Parameter Extraction
+      - name: 🔎 Run Subfinder
         run: |
-          set +e
-          mkdir -p recon_output/params
+          echo "[*] Running Subfinder..."
+          while read domain; do
+            subfinder -d "$domain" -all -recursive -o "recon_output/subs_${domain}.txt" 2>/dev/null || true
+          done < domains.txt
+          cat recon_output/subs_*.txt 2>/dev/null | sort -u > recon_output/Subs01.txt
+          echo "[+] Subfinder found $(wc -l < recon_output/Subs01.txt 2>/dev/null || echo 0) subdomains"
 
-          if [ -s recon_output/urls/AllURLs.txt ]; then
-            grep '=' recon_output/urls/AllURLs.txt > recon_output/params/urls_with_params.txt 2>/dev/null || true
+      - name: 🔎 Run Assetfinder
+        run: |
+          echo "[*] Running Assetfinder..."
+          while read domain; do
+            echo "$domain" | assetfinder --subs-only >> recon_output/Subs02_temp.txt 2>/dev/null || true
+          done < domains.txt
+          sort -u recon_output/Subs02_temp.txt > recon_output/Subs02.txt 2>/dev/null || touch recon_output/Subs02.txt
+          echo "[+] Assetfinder found $(wc -l < recon_output/Subs02.txt 2>/dev/null || echo 0) subdomains"
 
-            cat recon_output/params/urls_with_params.txt \
-              | qsreplace "FUZZ" 2>/dev/null \
-              | sort -u > recon_output/params/ParamURLs.txt || {
-                  sed 's/=[^&]*/=FUZZ/g' recon_output/params/urls_with_params.txt | sort -u > recon_output/params/ParamURLs.txt
-              }
+      - name: 🔎 Run Findomain
+        run: |
+          echo "[*] Running Findomain..."
+          while read domain; do
+            findomain -t "$domain" -u "recon_output/subs_findomain_${domain}.txt" 2>/dev/null || true
+          done < domains.txt
+          cat recon_output/subs_findomain_*.txt 2>/dev/null | sort -u > recon_output/Subs05.txt
+          echo "[+] Findomain found $(wc -l < recon_output/Subs05.txt 2>/dev/null || echo 0) subdomains"
 
-            sed 's/=[^&]*/=/g' recon_output/params/urls_with_params.txt | sort -u > recon_output/params/param.txt || true
+      - name: 🔎 Run Chaos
+        run: |
+          echo "[*] Running Chaos..."
+          if [ -n "$PDCP_API_KEY" ]; then
+            while read domain; do
+              chaos -d "$domain" -o "recon_output/subs_chaos_${domain}.txt" 2>/dev/null || true
+            done < domains.txt
+            cat recon_output/subs_chaos_*.txt 2>/dev/null | sort -u > recon_output/Subs06.txt
+            echo "[+] Chaos found $(wc -l < recon_output/Subs06.txt 2>/dev/null || echo 0) subdomains"
           else
-            touch recon_output/params/{ParamURLs.txt,param.txt,urls_with_params.txt}
+            echo "[!] PDCP_API_KEY not set, skipping Chaos"
+            touch recon_output/Subs06.txt
           fi
 
-      - name: 🎯 GF Patterns
+      - name: 🔎 Run crt.sh Passive Enumeration
         run: |
-          set +e
-          mkdir -p recon_output/gf_patterns
+          echo "[*] Running crt.sh passive scan..."
+          while read domain; do
+            curl -s "https://crt.sh/?q=%.${domain}&output=json" \
+              | jq -r '.[].name_value' 2>/dev/null \
+              | sed 's/\*\.//g' \
+              | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
+              >> recon_output/Subs_crt_temp.txt || true
+          done < domains.txt
+          sort -u recon_output/Subs_crt_temp.txt > recon_output/Subs_crt.txt 2>/dev/null || touch recon_output/Subs_crt.txt
+          echo "[+] crt.sh found $(wc -l < recon_output/Subs_crt.txt 2>/dev/null || echo 0) subdomains"
 
-          if [ -s recon_output/urls/AllURLs.txt ]; then
-            for pattern in xss sqli idor ssrf redirect lfi rce ssti debug; do
-              cat recon_output/urls/AllURLs.txt | gf "$pattern" 2>/dev/null | sort -u > "recon_output/gf_patterns/${pattern}.txt" || true
-            done
+      - name: 🔎 Run URLScan Passive
+        run: |
+          echo "[*] Running URLScan passive scan..."
+          while read domain; do
+            curl -s "https://urlscan.io/api/v1/search/?q=domain:${domain}&size=1000" \
+              | jq -r '.results[]?.page?.domain' 2>/dev/null \
+              | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
+              >> recon_output/Subs_urlscan_temp.txt || true
+            sleep 2  # Rate limiting
+          done < domains.txt
+          sort -u recon_output/Subs_urlscan_temp.txt > recon_output/Subs_urlscan.txt 2>/dev/null || touch recon_output/Subs_urlscan.txt
+          echo "[+] URLScan found $(wc -l < recon_output/Subs_urlscan.txt 2>/dev/null || echo 0) subdomains"
+
+      - name: 🔎 Run Web Archive Passive
+        run: |
+          echo "[*] Running Web Archive passive scan..."
+          while read domain; do
+            curl -s "http://web.archive.org/cdx/search/cdx?url=*.${domain}/*&output=json&collapse=urlkey" \
+              | jq -r '.[1:][] | .[2]' 2>/dev/null \
+              | grep -Eo "([a-zA-Z0-9_-]+\.)?${domain}" \
+              >> recon_output/Subs_archive_temp.txt || true
+            sleep 1
+          done < domains.txt
+          sort -u recon_output/Subs_archive_temp.txt > recon_output/Subs_archive.txt 2>/dev/null || touch recon_output/Subs_archive.txt
+          echo "[+] Web Archive found $(wc -l < recon_output/Subs_archive.txt 2>/dev/null || echo 0) subdomains"
+
+      - name: 📊 Merge & Deduplicate
+        run: |
+          echo "[*] Merging all results..."
+          cat recon_output/Subs*.txt recon_output/subs_*.txt 2>/dev/null \
+            | grep -E "^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$" \
+            | sort -u \
+            | anew recon_output/AllSubs.txt
+          
+          TOTAL=$(wc -l < recon_output/AllSubs.txt)
+          echo "[+] Total unique subdomains: $TOTAL"
+          echo "total_subs=$TOTAL" >> $GITHUB_ENV
+
+      - name: 🌐 HTTPx Probing
+        run: |
+          echo "[*] Running HTTPx on discovered subdomains..."
+          if [ -s recon_output/AllSubs.txt ]; then
+            httpx -l recon_output/AllSubs.txt \
+              -status-code \
+              -content-length \
+              -web-server \
+              -title \
+              -follow-redirects \
+              -o recon_output/httpx_results.txt \
+              -silent 2>/dev/null || true
+            
+            ALIVE=$(wc -l < recon_output/httpx_results.txt 2>/dev/null || echo 0)
+            echo "[+] Alive hosts: $ALIVE"
+            echo "alive_hosts=$ALIVE" >> $GITHUB_ENV
           else
-            for pattern in xss sqli idor ssrf redirect lfi rce ssti debug; do
-              touch "recon_output/gf_patterns/${pattern}.txt"
-            done
+            echo "[!] No subdomains found"
+            touch recon_output/httpx_results.txt
+            echo "alive_hosts=0" >> $GITHUB_ENV
           fi
 
-      - name: Upload URLs & Results
-        id: upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: urls-${{ github.run_id }}
-          path: |
-            recon_output/urls/
-            recon_output/params/
-            recon_output/gf_patterns/
-          retention-days: 7
-
-  # ============================================
-  # JOB 4: Summary & Discord (يعتمد على كل اللي فات)
-  # ============================================
-  summary:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    needs: [subdomain-enum, url-extraction]
-    if: always()
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download All Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: recon_output/
-          pattern: '*-${{ github.run_id }}'
-          merge-multiple: true
-
-      - name: 📈 Generate Summary
+      - name: 📤 Send Results to Discord
         run: |
-          set +e
-          mkdir -p recon_output/final
-
-          {
-            echo "========== RECON SUMMARY =========="
-            echo "Date: $(date)"
-            echo "Domains: ${{ github.event.inputs.domains }}"
-            echo ""
-            echo "[+] Total Subdomains: $(wc -l < recon_output/subs/AllSubs.txt 2>/dev/null || echo 0)"
-            echo "[+] Alive Hosts: $(wc -l < recon_output/subs/AliveSubs.txt 2>/dev/null || echo 0)"
-            echo "[+] Total URLs: $(wc -l < recon_output/urls/AllURLs.txt 2>/dev/null || echo 0)"
-            echo "[+] Parameter URLs: $(wc -l < recon_output/params/ParamURLs.txt 2>/dev/null || echo 0)"
-            echo ""
-            for f in recon_output/gf_patterns/*.txt; do
-              [ -f "$f" ] && echo "[+] $(basename $f | cut -d. -f1): $(wc -l < "$f")"
-            done
-          } > recon_output/final/SUMMARY.txt
-
-          cat recon_output/final/SUMMARY.txt
-
-      - name: 📤 Discord Notification
-        run: |
-          set +e
-          python3 << 'PYEOF'
-          import os, requests
-
+          python3 << 'EOF'
+          import os
+          import json
+          import requests
+          
           webhook = os.environ.get('DISCORD_WEBHOOK')
           if not webhook:
-              print("[!] No webhook"); exit(0)
-
-          def count(f):
-              try:
-                  with open(f) as file: return len(file.readlines())
-              except: return 0
-
-          stats = {
-              "subs": count('recon_output/subs/AllSubs.txt'),
-              "alive": count('recon_output/subs/AliveSubs.txt'),
-              "urls": count('recon_output/urls/AllURLs.txt'),
-              "params": count('recon_output/params/ParamURLs.txt'),
-          }
-
-          for pattern in ['xss','sqli','idor','ssrf','redirect','lfi','rce','ssti','debug']:
-              stats[pattern] = count(f'recon_output/gf_patterns/{pattern}.txt')
-
+              print("[!] No Discord webhook provided")
+              exit(1)
+          
+          total = os.environ.get('total_subs', '0')
+          alive = os.environ.get('alive_hosts', '0')
+          domains = os.environ.get('DOMAINS', 'unknown')
+          
+          # Create summary embed
           embed = {
               "title": "🔍 Recon Complete",
+              "description": f"**Domains:** {domains}\n**Total Subdomains:** {total}\n**Alive Hosts:** {alive}",
               "color": 0x00ff00,
-              "fields": [
-                  {"name": "📊 Subdomains", "value": f"Total: `{stats['subs']}`\nAlive: `{stats['alive']}`", "inline": True},
-                  {"name": "🔗 URLs", "value": f"Total: `{stats['urls']}`\nParams: `{stats['params']}`", "inline": True},
-                  {"name": "🎯 XSS", "value": f"`{stats['xss']}`", "inline": True},
-                  {"name": "💉 SQLi", "value": f"`{stats['sqli']}`", "inline": True},
-                  {"name": "🔓 IDOR", "value": f"`{stats['idor']}`", "inline": True},
-                  {"name": "🌐 SSRF", "value": f"`{stats['ssrf']}`", "inline": True},
-                  {"name": "↩️ Redirect", "value": f"`{stats['redirect']}`", "inline": True},
-                  {"name": "📁 LFI", "value": f"`{stats['lfi']}`", "inline": True},
-                  {"name": "⚡ RCE", "value": f"`{stats['rce']}`", "inline": True},
-              ]
+              "timestamp": requests.get("http://worldtimeapi.org/api/ip").json().get('datetime', '') if False else '',
+              "fields": []
           }
+          
+          # Read files for details
+          files_to_attach = []
+          
+          # Summary message
+          payload = {
+              "content": f"🎯 **Recon Results for:** `{domains}`\n📊 **Total Subdomains:** `{total}`\n🌐 **Alive Hosts:** `{alive}`",
+              "embeds": [embed]
+          }
+          
+          # Send initial message
+          response = requests.post(webhook, json=payload)
+          print(f"Discord response: {response.status_code}")
+          
+          # Upload files if they exist
+          import glob
+          for file in glob.glob('recon_output/*.txt'):
+              if os.path.getsize(file) > 0:
+                  with open(file, 'rb') as f:
+                      files = {'file': (os.path.basename(file), f)}
+                      resp = requests.post(webhook, files=files)
+                      print(f"Uploaded {file}: {resp.status_code}")
+          
+          EOF
+        env:
+          DOMAINS: ${{ github.event.inputs.domains }}
 
-          try:
-              resp = requests.post(webhook, json={"embeds": [embed]}, timeout=30)
-              print(f"Sent: {resp.status_code}")
-          except Exception as e:
-              print(f"Error: {e}")
-
-          for filepath in ['recon_output/final/SUMMARY.txt', 'recon_output/gf_patterns/xss.txt', 'recon_output/gf_patterns/sqli.txt']:
-              try:
-                  if os.path.exists(filepath) and 0 < os.path.getsize(filepath) < 8*1024*1024:
-                      with open(filepath, 'rb') as f:
-                          files = {'file': (os.path.basename(filepath), f)}
-                          resp = requests.post(webhook, files=files, timeout=30)
-                          print(f"Uploaded {filepath}: {resp.status_code}")
-              except Exception as e:
-                  print(f"Upload error: {e}")
-          PYEOF
-
-      - name: 📦 Upload Final Artifacts
+      - name: 📦 Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: recon-v7-${{ github.run_id }}
+          name: recon-results-${{ github.run_id }}
           path: recon_output/
           retention-days: 7
-          if-no-files-found: warn
